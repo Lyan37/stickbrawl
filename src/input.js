@@ -148,6 +148,8 @@ function swapPlayers() {
 }
 function bindPad(player, action, btn) {
   if (PAD_DIRS.has(action) || PAD_RESERVED.has(btn)) return false;
+  // one pad button = one action per player, so a rebind never also fires the button's old action
+  for (const b of BTN) if (b !== action) PADMAPS[player][b] = PADMAPS[player][b].filter((i) => i !== btn);
   PADMAPS[player][action] = [btn];
   saveDevices();
   return true;
@@ -182,9 +184,15 @@ function playerSources(player) {
   }
   return { maps: [KEYMAPS[player]], pads: [] };
 }
-// VS CPU: the human is P1 on every input at once: both key sets and every connected gamepad
+// VS CPU: the human is P1 on every input at once: both key sets and every connected gamepad.
+// Gamepads use the button map of whichever column is set to GAMEPAD (P1 first), since that's the one
+// the controls screen shows and lets you rebind.
+function soloPadmap() {
+  return DEVICES.p1 === 'pad' ? PADMAPS.p1 : DEVICES.p2 === 'pad' ? PADMAPS.p2 : PADMAPS.p1;
+}
 function soloSources() {
-  return { maps: [KEYMAPS.p1, KEYMAPS.p2], pads: connectedPads().map((gp) => [gp, PADMAPS.p1]) };
+  const pm = soloPadmap();
+  return { maps: [KEYMAPS.p1, KEYMAPS.p2], pads: connectedPads().map((gp) => [gp, pm]) };
 }
 
 // sources() returns { maps: keymaps to read, pads: [[gamepad, padmap], ...] }; re-read every frame so
