@@ -16,7 +16,8 @@ const DEFAULT_KEYMAPS = {
 };
 // live keymaps: Controllers hold references to KEYMAPS.p1 / .p2, so edits apply immediately
 const KEYMAPS = { p1: {}, p2: {} };
-const KEYMAP_STORE = 'stickbrawl.keymaps.v1';
+const KEYMAP_STORE = 'classiquebrawl.keymaps.v1';
+const KEYMAP_STORE_OLD = 'stickbrawl.keymaps.v1'; // pre-rename saves are still read
 const RESERVED_KEYS = new Set(['Escape', 'KeyP']); // pause / cancel
 const BLOCK = new Set(['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab']);
 let boundKeys = new Set();
@@ -35,7 +36,7 @@ function saveKeymaps() {
 function loadKeymaps() {
   resetKeymaps();
   let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(KEYMAP_STORE)); } catch (e) { saved = null; }
+  try { saved = JSON.parse(localStorage.getItem(KEYMAP_STORE) || localStorage.getItem(KEYMAP_STORE_OLD)); } catch (e) { saved = null; }
   if (!saved || typeof saved !== 'object') return;
   for (const p in KEYMAPS) {
     const m = saved[p];
@@ -44,6 +45,11 @@ function loadKeymaps() {
       const v = m[b];
       if (Array.isArray(v) && v.length <= 4 && v.every((c) => typeof c === 'string' && c && !RESERVED_KEYS.has(c))) KEYMAPS[p][b] = v.slice();
     }
+  }
+  // saves from before an action existed keep its default, unless that key is already used elsewhere
+  for (const p in KEYMAPS) for (const b of BTN) {
+    if (saved[p] && saved[p][b]) continue;
+    KEYMAPS[p][b] = KEYMAPS[p][b].filter((c) => !Object.keys(KEYMAPS).some((q) => BTN.some((o) => (q !== p || o !== b) && KEYMAPS[q][o].includes(c))));
   }
   refreshBound();
 }
@@ -96,6 +102,14 @@ function anyHit(...codes) { return codes.some((c) => Keys.hit.has(c)); }
 
 function emptyButtons() { const o = {}; for (const b of BTN) o[b] = false; return o; }
 
+// connected gamepads in order (browsers can leave holes in getGamepads(), so index by slot, not by gp.index)
+function connectedPads() {
+  const out = [];
+  if (navigator.getGamepads) for (const gp of navigator.getGamepads()) if (gp && gp.connected !== false) out.push(gp);
+  return out;
+}
+
+// maps = keyboard keymaps this player reads; pad = gamepad slot (0 = first connected pad), -1 = none
 class Controller {
   constructor(maps = [], pad = -1) {
     this.maps = maps; this.pad = pad;
@@ -111,7 +125,7 @@ class Controller {
         }
       }
     }
-    const gp = this.pad >= 0 && navigator.getGamepads ? navigator.getGamepads()[this.pad] : null;
+    const gp = this.pad >= 0 ? connectedPads()[this.pad] : null;
     if (gp) {
       const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
       const p = (i) => !!(gp.buttons[i] && gp.buttons[i].pressed);

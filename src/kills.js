@@ -263,7 +263,7 @@ function killStep(f, w) {
       if (!K.boom) {
         f.gravScale = 0.55;
         for (let i = 0; i < 3; i++) {
-          w.parts.push({ x: f.x + rand(-2, 2), y: f.y + rand(-1, 3), vx: -f.vx * 0.3 + rand(-0.5, 0.5), vy: rand(1, 2.8), life: randi(8, 15), t: 0, s: randi(2, 3), nograv: 1, col: pick([PAL.yellow, PAL.orange, PAL.orange, PAL.red]), ring: Math.random() < 0.3 });
+          w.parts.push({ x: f.x + rand(-2, 2), y: f.y + rand(-1, 3), vx: -f.vx * 0.3 + rand(-0.5, 0.5), vy: rand(1, 2.8), life: randi(8, 15), t: 0, s: randi(2, 3), nograv: 1, col: pick([PAL.hot, PAL.orange, PAL.orange, PAL.red]), ring: Math.random() < 0.3 });
         }
         if (K.t % 2 === 0) f.addGhost();
         if (f.vy > -0.6 || T > 70) boom(f, w, K, T);
@@ -282,7 +282,7 @@ function killStep(f, w) {
           if (K.plowX == null) K.plowX = f.x;
           K.plowEnd = f.x;
           w.dust(f.x - dir * 3, 0, 1, -dir);
-          if (K.t % 2 === 0) w.parts.push({ x: f.x, y: -1, vx: -dir * rand(1, 3), vy: -rand(1, 2.5), life: randi(8, 12), t: 0, s: randi(1, 2), col: pick([PAL.yellow, PAL.orange]) });
+          if (K.t % 2 === 0) w.parts.push({ x: f.x, y: -1, vx: -dir * rand(1, 3), vy: -rand(1, 2.5), life: randi(8, 12), t: 0, s: randi(1, 2), col: pick([PAL.hot, PAL.orange]) });
           if (K.t % 3 === 0) f.addGhost();
         }
       }
@@ -308,7 +308,7 @@ function boom(f, w, K, T) {
   for (let i = 0; i < 3; i++) w.fx.push({ k: 'ring', x, y, r: 26 + i * 16, t: -i * 3, life: 14 + i * 3 });
   for (let i = 0; i < 40; i++) {
     const a = rand(0, TAU), sp = rand(1.5, 6);
-    w.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: randi(16, 32), t: 0, s: randi(2, 3), ring: Math.random() < 0.5, col: pick([PAL.yellow, PAL.orange, PAL.red, '#ffffff', PAL.pale]), floaty: 1 });
+    w.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: randi(16, 32), t: 0, s: randi(2, 3), ring: Math.random() < 0.5, col: pick([PAL.hot, PAL.orange, PAL.red, '#ffffff', '#ffffff']), floaty: 1 });
   }
   f.vy = -1.5; f.vx = K.dir * 1.2; f.flash = 6;
   w.game.shake(8); w.game.invert = 3;
@@ -394,7 +394,7 @@ function drawKilled(f, t) {
         const h = toScreen(f.sk.head);
         for (let i = 0; i < 3; i++) {
           const a = t * 0.12 + i * 2.09, sx = h[0] + Math.cos(a) * 9 * z, sy = h[1] - 7 * z + Math.sin(a) * 3 * z;
-          G.col(i === 1 ? PAL.cyan : PAL.yellow);
+          G.col(i === 1 ? PAL.cyan : PAL.hot);
           G.rect(sx - 1, sy - 2, 1, 3); G.rect(sx - 2, sy - 1, 3, 1);
         }
       }
@@ -503,7 +503,7 @@ function drawKillOver(w, t) {
         if (K.t < 40) {
           const pop = K.t < 4 ? 1.3 : 1, sz = 24 * z * pop;
           G.col('#ffffff'); star(px, py - 10 * z, 10, sz * 1.1, sz * 0.55, K.t * 0.04, 5);
-          G.col(PAL.yellow); star(px, py - 10 * z, 10, sz * 0.9, sz * 0.45, K.t * 0.04, 5);
+          G.col(PAL.hot); star(px, py - 10 * z, 10, sz * 0.9, sz * 0.45, K.t * 0.04, 5);
           otext('POW!', px, py - 10 * z - 9, 2, 'center', PAL.red);
         }
         break;
@@ -524,7 +524,7 @@ function drawKillOver(w, t) {
           const top = -20, bot = lerp(top, gy, grow);
           G.ctx.globalAlpha = T < 0 ? 1 : 1 - T / 8;
           G.col('#ffffff'); G.line(xAt(top), top, xAt(bot), bot, T < 0 ? 3 : 1);
-          if (grow >= 1) { G.col(PAL.yellow); star(xAt(gy), gy, 6, 7 * z, 3 * z, K.t * 0.2, 9); }
+          if (grow >= 1) { G.col(PAL.hot); star(xAt(gy), gy, 6, 7 * z, 3 * z, K.t * 0.2, 9); }
           G.ctx.globalAlpha = 1;
         }
         break;

@@ -302,8 +302,40 @@ function drawFighter(f, t) {
   const back = white ? '#e6e6e6' : PBACK[f.id];
   const dodging = f.inv > 0 && f.state === 'dodge';
   if (dodging) G.ctx.globalAlpha = t % 4 < 2 ? 0.45 : 0.7;
-  paintFighter(f, front, back, jx, jy, white);
+  // guard / parry tint: steel-blue flash on a blocked hit or a parry
+  const guarded = !white && f.blockFlash > 0 && f.blockFlash % 4 < 2;
+  paintFighter(f, guarded ? PAL.cyan : front, guarded ? PAL.smear : back, jx, jy, white);
   G.ctx.globalAlpha = 1;
+  drawGuard(f, t);
+}
+
+// crouch-block shield arc and the parry window's flash in front of the body
+function drawGuard(f, t) {
+  const z = Cam.z, fx = f.facing;
+  if (f.state === 'block' || f.state === 'blockstun') {
+    const cx = Cam.sx(f.x + fx * 9), cy = Cam.sy(f.y - 13), hit = f.state === 'blockstun';
+    G.col(hit ? '#ffffff' : PAL.cyan);
+    G.ctx.globalAlpha = hit ? 0.9 : 0.35 + 0.1 * Math.sin(t * 0.3);
+    for (let i = -3; i <= 3; i++) {
+      const a = (i / 3) * 0.9;
+      G.rect(cx + Math.cos(a) * 12 * z * fx - 1, cy + Math.sin(a) * 12 * z - 1, 2, 2);
+    }
+    G.ctx.globalAlpha = 1;
+  }
+  // riposte: a glint runs to the weapon tip as it snaps onto the enemy
+  if (f.state === 'riposte' && f.sf < 12 && f.sk) {
+    const len = Math.max(8, (WEAPONS[f.weapon || 'none'].len || 0)), h = f.sk.handA, d = f.sk.wdir;
+    const gx = Cam.sx(h[0] + d[0] * len), gy = Cam.sy(h[1] + d[1] * len), g = 1 - f.sf / 12;
+    G.col('#ffffff'); star(gx, gy, 4, (3 + 6 * g) * z, 1, f.sf * 0.3, 4);
+  }
+  if (f.parrying()) {
+    const k = f.pf / PARRY.win;
+    const cx = Cam.sx(f.x + fx * 10), cy = Cam.sy(f.y - 20);
+    G.col('#ffffff'); G.ctx.globalAlpha = 1 - k * 0.6;
+    G.ring(cx, cy, (8 + k * 6) * z, 1);
+    G.rect(cx - 1, cy - 12 * z, 2, 24 * z);
+    G.ctx.globalAlpha = 1;
+  }
 }
 
 function drawTag(f, label) {
@@ -425,9 +457,9 @@ function drawFx(world, t) {
         const sz = e.size * z;
         if (e.t < 2) { G.col('#ffffff'); star(x, y, 9, sz * 1.1, sz * 0.5, e.rot, e.seed); break; }
         const sh = 1 - easeOut(k) * 0.7;
-        G.col(PAL.yellow); star(x, y, 9, sz * sh, sz * 0.45 * sh, e.rot + k * 0.3, e.seed);
-        G.col(PAL.pale); G.disc(x, y, sz * 0.3 * sh);
-        G.col(PAL.yellow);
+        G.col(PAL.hot); star(x, y, 9, sz * sh, sz * 0.45 * sh, e.rot + k * 0.3, e.seed);
+        G.col('#ffffff'); G.disc(x, y, sz * 0.3 * sh);
+        G.col(PAL.hot);
         for (let i = 0; i < 6; i++) {
           const a = e.rot + i * 1.05 + 0.4, r0 = sz * (0.9 + k * 0.8), r1 = r0 + sz * 0.6 * (1 - k);
           G.line(x + Math.cos(a) * r0, y + Math.sin(a) * r0, x + Math.cos(a) * r1, y + Math.sin(a) * r1, 1);
@@ -452,12 +484,32 @@ function drawFx(world, t) {
         break;
       }
       case 'muzzle':
-        G.col(e.t < 2 ? '#ffffff' : PAL.yellow);
+        G.col(e.t < 2 ? '#ffffff' : PAL.hot);
         if (e.t < 2) star(x, y, 5, 5 * z, 2 * z, 0, 3); else G.ring(x, y, 4 * z, 1);
         break;
       case 'label':
         otext(e.s, x, y - e.t * 0.3, 1, 'center', '#ffffff');
         break;
+      case 'guard': {   // blocked hit: a bright bracket that flares and fades
+        G.col(e.t < 3 ? '#ffffff' : PAL.cyan);
+        const h = (12 + k * 6) * z, bx = x + e.f * k * 4 * z;
+        G.ctx.globalAlpha = 1 - k;
+        G.rect(bx - 1, y - h, 2, h * 2); G.rect(bx - e.f * 4 * z, y - h, 4 * z, 2); G.rect(bx - e.f * 4 * z, y + h - 2, 4 * z, 2);
+        G.ctx.globalAlpha = 1;
+        break;
+      }
+      case 'burst': {   // burst: thick expanding ring + inner star
+        G.col(e.t < 3 ? '#ffffff' : PAL.accent);
+        G.ring(x, y, (8 + easeOut(k) * BURST.radius) * z, e.t < 8 ? 3 : 1);
+        if (e.t < 8) star(x, y, 8, (14 + k * 20) * z, 4 * z, k, 8);
+        break;
+      }
+      case 'parry': {   // parry: white flash + expanding cyan star
+        G.col(e.t < 3 ? '#ffffff' : PAL.cyan);
+        star(x, y, 4, (10 + k * 18) * z, 2 * z, k * 2, 4);
+        G.ring(x, y, (6 + easeOut(k) * 26) * z, e.t < 6 ? 2 : 1);
+        break;
+      }
     }
   }
 }
@@ -471,16 +523,24 @@ function drawBar(f, side, combo) {
   G.col(PAL.dim); G.rect(px - 11, y - 9, 22, 22);
   G.col(PCOL[f.id]); G.disc(px, y - 1, 5); G.taper(px, y + 13, px, y + 5, 6, 3);
   otext(f.name, side === 1 ? x0 : x0 + bw, y - 12, 1, side === 1 ? 'left' : 'right', '#ffffff');
-  // HP: yellow on a black well, crimson lag segment, thin grey frame
+  // HP: near-white on a black well, crimson lag segment, thin grey frame (flashes red when low)
   G.col(PAL.dim); G.rect(x0 - 2, y - 2, bw + 4, bh + 4);
   G.col(PAL.hpWell); G.rect(x0 - 1, y - 1, bw + 2, bh + 2);
   const wd = Math.round((bw * f.dispHp) / f.maxHp), wh = Math.round((bw * f.hp) / f.maxHp);
   const fill = (w) => (side === 1 ? G.rect(x0, y, w, bh) : G.rect(x0 + bw - w, y, w, bh));
   G.col(PAL.crimson); fill(wd);
-  G.col(f.hp < 25 && Math.floor(Date.now() / 180) % 2 ? '#ffffff' : PAL.yellow); fill(wh);
+  G.col(f.hp < 25 && Math.floor(Date.now() / 180) % 2 ? PAL.red : PAL.hp); fill(wh);
   // weapon + round wins
+  // burst meter: thin bar under the HP bar on the outer side; flashes BURST when full
+  const mw = 110, mh = 3, my = y + bh + 4, mx = side === 1 ? x0 : x0 + bw - mw, full = f.burst >= BURST.max;
+  G.col(PAL.dim); G.rect(mx - 1, my - 1, mw + 2, mh + 2);
+  G.col(PAL.hpWell); G.rect(mx, my, mw, mh);
+  const fw = Math.round((mw * f.burst) / BURST.max);
+  G.col(full ? (Math.floor(Date.now() / 120) % 2 ? '#ffffff' : PAL.accent) : PAL.steel);
+  if (side === 1) G.rect(mx, my, fw, mh); else G.rect(mx + mw - fw, my, fw, mh);
+  if (full) text('BURST', side === 1 ? mx + mw + 5 : mx - 5, my - 2, 1, side === 1 ? 'left' : 'right', PAL.accent, true);
   const wname = f.weapon ? WEAPONS[f.weapon].name : 'FISTS';
-  text(wname, side === 1 ? x0 : x0 + bw, y + bh + 5, 1, side === 1 ? 'left' : 'right', PAL.mid);
+  text(wname, side === 1 ? x0 : x0 + bw, y + bh + 11, 1, side === 1 ? 'left' : 'right', PAL.mid);
   for (let i = 0; i < 2; i++) {
     const qx = side === 1 ? x0 + bw - 7 - i * 10 : x0 + i * 10 + 1;
     G.col('#ffffff');
@@ -491,8 +551,33 @@ function drawBar(f, side, combo) {
   if (combo) {
     const cx = side === 1 ? x0 + 4 : x0 + bw - 4, al = side === 1 ? 'left' : 'right';
     const pop = combo.t > 94 ? 4 : 3;
-    otext(String(combo.n), cx, y + 26, pop, al, '#ffffff', true);
-    otext('HITS', cx + (side === 1 ? 2 : -2), y + 26 + pop * FONT_H + 4, 1, al, PAL.light, true);
+    otext(String(combo.n), cx, y + 32, pop, al, '#ffffff', true);
+    otext('HITS', cx + (side === 1 ? 2 : -2), y + 32 + pop * FONT_H + 4, 1, al, PAL.light, true);
+  }
+}
+
+// ---------------- frame meter (FRAME DATA option) ----------------
+// one cell per frame for the last FRAME_HIST frames, coloured by Fighter.phase(),
+// plus the startup / active / recovery count of the current or last action
+const PHASE_COL = {
+  neutral: '#37383a', startup: '#3fd26b', active: '#ff333d', recovery: '#4f8dff',
+  inv: '#ffffff', parry: '#94e4ff', guard: '#6d8696', block: '#a4c1d5', stun: '#ff8a5c',
+};
+function drawFrameMeter(fs) {
+  const cw = 4, ch = 5, x0 = Math.round(W / 2 - (FRAME_HIST * cw) / 2), y0 = H - 40;
+  G.ctx.globalAlpha = 0.75; G.col('#000000'); G.rect(x0 - 70, y0 - 4, FRAME_HIST * cw + 170, 30); G.ctx.globalAlpha = 1;
+  fs.forEach((f, r) => {
+    const y = y0 + r * (ch + 3), h = f.fhist, off = FRAME_HIST - h.length;
+    text(f.name, x0 - 6, y, 1, 'right', PCOL[f.id]);
+    for (let i = 0; i < h.length; i++) { G.col(PHASE_COL[h[i]] || PHASE_COL.neutral); G.rect(x0 + (off + i) * cw, y, cw - 1, ch); }
+    const d = f.fd || f.lastFD;
+    if (d) text(d.name + ' ' + d.s + '/' + (d.a || d.i) + '/' + d.r, x0 + FRAME_HIST * cw + 6, y, 1, 'left', f.fd ? '#ffffff' : PAL.mid);
+  });
+  let lx = x0;
+  for (const [k, label] of [['startup', 'STARTUP'], ['active', 'ACTIVE'], ['recovery', 'RECOVERY'], ['inv', 'INV'], ['parry', 'PARRY'], ['block', 'BLOCK'], ['stun', 'STUN']]) {
+    G.col(PHASE_COL[k]); G.rect(lx, y0 + 18, 3, 3);
+    text(label, lx + 5, y0 + 16, 1, 'left', PAL.mid);
+    lx += textWidth(label, 1) + 12;
   }
 }
 

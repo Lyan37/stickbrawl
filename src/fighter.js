@@ -5,17 +5,49 @@ const PHYS = {
   air: 2.8, jump: -7.6, airJump: -6.9, airJumps: 2,
   dash: 6.6, dashT: 15, gpV: 9.5,
 };
-// Brawlhalla dodge rules (frames @60fps)
+// dodge rules (frames @60fps). inv = invincible frames; the rest of T is the dodge's recovery.
+// roll = ground dodge + side (invincible dash); falls back to a plain dash while dodge is on cooldown.
 const DODGE = {
-  groundInv: 16, groundT: 20, groundCD: 60,
-  airSpotInv: 20, airSpotT: 22, airDirInv: 12, airDirT: 22, airCD: 163, airClear: 75,
-  chaseInv: 17, chaseT: 18, chaseWin: 12,
+  groundCD: 54,                      // ground dodge cooldown (rolls / up-dodge); neutral dodge = burst
+  rollInv: 18, rollT: 26, rollMove: 15, rollSpd: 6.4,
+  airSpotInv: 26, airSpotT: 32, airDirInv: 18, airDirT: 28, airDirMove: 16, airDirSpd: 6.4, airCD: 150, airClear: 70,
+  chaseInv: 20, chaseT: 22, chaseWin: 18,
+  buf: 12,                           // dodge presses are buffered a bit longer than other buttons
+  lenient: 4,                        // a direction pressed this soon after a neutral dodge still turns it directional
 };
+// crouch block (hold down on the ground): blocks hits from the front for chip damage.
+// Ground pounds are overheads and break it; chip that would KO lands as a real hit instead.
+// stun: blockstun = move stun × this (min stunMin), a bit longer than before (was 0.8×) so blocking holds you longer
+const GUARD = { chip: 0.2, stun: 0.95, stunMin: 8, push: 2.4, attPush: 1.2, stop: 5, hurtH: 25 };
+// parry = TAP DOWN on the ground: starts the weapon's deflect move (weapons.js PARRY_SWING). Its first `win`
+// frames catch an incoming hit, cancel it and stun the attacker. Still holding down when the window ends ->
+// crouch block instead; a tap that caught nothing -> recovery (punishable, no swing). down + attack/throw/dodge
+// within `lenient` frames still gives the down move. `cd` keeps one parry per ~1 s, tapped or held.
+// On a SUCCESSFUL melee parry the weapon's parry attack (moves.parryAtk) fires automatically at the attacker,
+// then the riposte pose follows (weapon aimed at the enemy, cancellable on any frame).
+// The parried fighter can't do anything about it: no counter-parry.
+const PARRY = { win: PARRY_WIN, lenient: 3, cd: 52, stun: 38, stop: 12, inv: 10, riposte: 24 };
+// recovery-frame system: every committal action ends in recovery frames (see Fighter.phase()).
+// Whiffs recover slower, connected hits faster (REC_ON_HIT), blocked hits at the base value.
+// Getting hit during your own recovery is a PUNISH: extra damage and hitstun.
+const RECOVERY = { whiff: 1.25, punishDmg: 1.2, punishStun: 1.3 };
+// burst (YOMI Hustle style): dodge with NO direction, costs a full burst bar. Works as a combo breaker while
+// in hitstun/blockstun, and in neutral (where spot dodge used to be). Invincible burst that knocks the
+// opponent back a little for chip damage (non-lethal) and refreshes your air options; the last frames are recovery.
+// Works on the ground and in the air (a combo breaker mid-juggle too).
+// In the air a neutral dodge is still the air dodge (gravity cancel) while you have it.
+// Meter: regen per frame (empty to full in ~60 s), + per damage taken / dealt; each round starts at `start`.
+const BURST = { max: 100, start: 50, regen: 100 / 3600, onHurt: 3, onHit: 1, t: 20, inv: 14, hover: 12, radius: 60, chip: 2, push: 3.5, pushUp: -2, stun: 18, stop: 8 };
 const BUF = 8;                       // input buffer
+const PICKUP_BUF = 16;               // unarmed throw press stays live this long, so running onto a weapon still grabs it
 const HURT_W = 14, HURT_H = 36;
+const FRAME_HIST = 60;              // frames kept for the frame meter
 const REPEAT_BLOCK = 10;             // same light attack can't be repeated back-to-back (whiff spam)
 const LENIENT = 3;                   // frames after pressing light where a late direction still re-picks the move
-const REC_ON_HIT = 0.55;             // recovery is shorter when the move connected (Brawlhalla rule)
+const REC_ON_HIT = 0.4;              // recovery is shorter when the move connected (Brawlhalla rule)
+// hitstun = move stun × HITSTUN_MUL (× combo decay). Lowered from 1.45 so getting hit recovers faster;
+// REC_ON_HIT dropped with it (0.55 → 0.4) so every on-hit link keeps the same frame advantage.
+const HITSTUN_MUL = 1.32;
 const CHAIN_WINDOW = 24;             // greatsword chain stays live this long after a move ends
 const WHIFF_DODGE_LOCK = 7;          // Brawlhalla: no dodging for 7f after an attack that missed
 // combo decay (see World.comboStun): hitstun multipliers that stop loops from being infinite
@@ -23,6 +55,9 @@ const COMBO = { decay: 0.1, floor: 0.55, stale: 0.65, projNear: 30, projFall: 22
 // scarf cloth (verlet): tails = [points, segment length]; trail pushes tails behind the facing,
 // wind is a constant breeze, flutter is a ripple travelling down each tail
 const SCARF = { tails: [[8, 3], [6, 2.6]], damp: 0.9, grav: 0.13, trail: 0.05, wind: -0.02, flutter: 0.16, iters: 4 };
+// attack direction from the stick: diagonals resolve vertically (up-diag = neutral/up, down-diag = down);
+// only pure left/right is a side attack
+const attackDir = (dx, dy) => (dy > 0 ? 'd' : dy < 0 ? 'n' : dx ? 's' : 'n');
 const wrapDeg = (d) => ((((d + 180) % 360) + 360) % 360) - 180;
 const normTo = (pose, ref) => { const o = pose.slice(); for (let i = 0; i < 10; i++) o[i] = ref[i] + wrapDeg(o[i] - ref[i]); return o; };
 let MOVE_INST = 0;
@@ -40,17 +75,19 @@ class Fighter {
     Object.assign(this, {
       x, y: 0, vx: 0, vy: 0, facing, ground: true,
       state: 'idle', sf: 0, clock: 0, hp: 100, maxHp: 100, dispHp: 100,
-      weapon: null, jumps: PHYS.airJumps, recAvail: true, airDodge: true, dodgeCD: 0, airDodgeAt: -1, gcUsed: false,
+      weapon: null, jumps: PHYS.airJumps, recAvail: true, airDodge: true, airDash: true, dodgeCD: 0, airDodgeAt: -1, gcUsed: false,
       move: null, part: null, pi: 0, pf: 0, af: -1, rf: -1, recLen: 0, moveInst: 0,
       partHit: false, moveHit: false, hitCount: 0, lastHitF: -99, gc: false, weakRec: false,
       charge: 0, chargeMul: 1, throwDir: 0, lastMove: null, lastEnd: -99, dodgeLock: 0, cInst: null, cIds: null,
-      chain: null, chainT: 0, chaseN: 0, chaseT: 0,
+      chain: null, chainT: 0, chaseN: 0, chaseT: 0, parryCD: 0, ripTarget: null, burst: BURST.start, moveBlocked: false, blockFlash: 0,
+      fd: null, lastFD: null, fhist: [],
       inv: 0, stun: 0, hitstop: 0, flash: 0, combo: 0, comboShow: null,
-      dashDir: 0, fastfall: false, gravScale: 1, squash: 0, landT: 0,
+      dashDir: 0, dashUX: 0, dashUY: 0, dashLen: false, fastfall: false, gravScale: 1, squash: 0, landT: 0,
       dodgeKind: null, dodgeT: 0, chaseDodge: false, runPhase: 0, prevDx: 0, kill: null, wpnAway: false, bowShot: -99, scarf: null,
     });
-    this.buf = { jump: 0, light: 0, heavy: 0, dodge: 0, throw: 0 };
-    this.bufDir = { jump: [0, 0], light: [0, 0], heavy: [0, 0], dodge: [0, 0], throw: [0, 0] };
+    // down = a fresh press of down on the ground (tap-down parry)
+    this.buf = { jump: 0, light: 0, heavy: 0, dodge: 0, throw: 0, down: 0 };
+    this.bufDir = { jump: [0, 0], light: [0, 0], heavy: [0, 0], dodge: [0, 0], throw: [0, 0], down: [0, 0] };
     this.tap = { dir: 0, t: 0 };
     this.pose = this.stance().slice();
     this.partFrom = this.pose.slice(); this.recFrom = this.pose.slice();
@@ -68,8 +105,39 @@ class Fighter {
     return this.state === 'run' || this.state === 'dash' || (this.state === 'idle' && w.idleRun);
   }
   stance() { return this.wpn.STANCE; }
-  hurtbox() { return { x: this.x - HURT_W / 2, y: this.y - HURT_H, w: HURT_W, h: HURT_H }; }
-  get free() { return this.state === 'idle' || this.state === 'run' || this.state === 'air'; }
+  hurtbox() {
+    const h = this.crouching ? GUARD.hurtH : HURT_H;
+    return { x: this.x - HURT_W / 2, y: this.y - h, w: HURT_W, h };
+  }
+  get crouching() { return this.state === 'block' || this.state === 'blockstun'; }
+  get free() { return this.state === 'idle' || this.state === 'run' || this.state === 'air' || this.state === 'block' || this.state === 'riposte'; }
+
+  // what this fighter is doing this frame, for the recovery-frame system and the frame meter:
+  // startup | active | recovery | inv | parry | guard | block | stun | neutral
+  // raw = ignore the parry overlay (frame counts report the nlight's own startup/active)
+  phase(raw = false) {
+    switch (this.state) {
+      case 'attack': {
+        if (!raw && this.parrying()) return 'parry';
+        if (this.rf >= 0) return 'recovery';
+        const p = this.part;
+        if (!p) return 'startup';
+        const f = Math.max(0, this.af);
+        if (p.fall) return f >= p.s ? 'active' : 'startup';
+        return f >= p.s && (p.hb || p.proj) ? 'active' : 'startup';   // hitbox-less parts count as startup
+      }
+      case 'dodge': return this.inv > 0 ? 'inv' : 'recovery';
+      case 'land': return 'recovery';
+      case 'block': return 'guard';
+      case 'blockstun': return 'block';
+      case 'burst': return this.inv > 0 ? 'inv' : 'recovery';
+      case 'hitstun': return 'stun';
+      case 'ko': return 'stun';
+      default: return this.inv > 0 ? 'inv' : 'neutral';
+    }
+  }
+  inRecovery() { return this.phase() === 'recovery'; }
+  opponent(world) { return world.game.fighters.find((f) => f !== this); }
   heldDx() { const h = this.ctrl.held; return (h.right ? 1 : 0) - (h.left ? 1 : 0); }
 
   // runs every frame, even during hitstop, so inputs pressed in hit-freeze are kept
@@ -77,8 +145,13 @@ class Fighter {
     const c = this.ctrl, frozen = this.hitstop > 0;
     const hdx = (c.held.right ? 1 : 0) - (c.held.left ? 1 : 0), hdy = (c.held.down ? 1 : 0) - (c.held.up ? 1 : 0);
     for (const b in this.buf) {
+      // down pressed in the air is a fast-fall, not a parry
+      if (b === 'down' && !this.ground) { this.buf.down = 0; continue; }
       if (c.pressed[b]) this.bufDir[b] = [hdx, hdy];   // remember the direction held when the button was pressed
-      if (c.pressed[b]) this.buf[b] = b === 'dodge' && this.state === 'attack' && this.moveHit ? 40 : BUF;
+      if (c.pressed[b]) {
+        this.buf[b] = b === 'dodge' ? (this.state === 'attack' && this.moveHit ? 40 : DODGE.buf)
+          : b === 'throw' && !this.weapon ? PICKUP_BUF : BUF;
+      }
       else if (this.buf[b] > 0 && !frozen) this.buf[b]--;
     }
   }
@@ -98,7 +171,10 @@ class Fighter {
     this.prevDx = dx;
 
     this.clock++;
+    if (this.state !== 'ko' && world.game.mode !== 'intro') this.burst = Math.min(BURST.max, this.burst + BURST.regen);
     if (this.dodgeCD > 0) this.dodgeCD--;
+    if (this.parryCD > 0) this.parryCD--;
+    if (this.blockFlash > 0) this.blockFlash--;
     if (this.inv > 0) this.inv--;
     if (this.squash > 0) this.squash--;
     if (this.flash > 0) this.flash--;
@@ -114,6 +190,11 @@ class Fighter {
       case 'idle':
       case 'run':
         if (this.tryActions(dx, dy, world, dtap, false)) break;
+        if (dy > 0 && this.ground) {
+          // tap down = parry (the parry move turns into a block if down is still held when its window ends)
+          if (this.buf.down && this.parryCD === 0) { this.buf.down = 0; this.startParry(); break; }
+          this.startBlock(dx, world); break;
+        }
         this.vx = approach(this.vx, dx * PHYS.run, dx ? PHYS.accel : PHYS.fric);
         if (dx) this.facing = dx;
         this.state = dx || Math.abs(this.vx) > 0.4 ? 'run' : 'idle';
@@ -124,13 +205,38 @@ class Fighter {
         if (dx) this.facing = dx;
         if (dy > 0 && this.vy > -1.5) this.fastfall = true;
         break;
+      case 'block':   // crouch block: hold down
+        if (this.tryActions(dx, dy, world, dtap, false)) break;
+        if (dy <= 0 || !this.ground) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; break; }
+        if (dx) this.facing = dx;
+        this.vx = approach(this.vx, 0, 0.6);
+        break;
+      case 'blockstun':
+        if (this.tryBreakBurst(world)) break;
+        this.stun--;
+        this.vx = approach(this.vx, 0, 0.3);
+        if (this.stun <= 0) { this.state = dy > 0 && this.ground ? 'block' : this.ground ? 'idle' : 'air'; this.sf = 0; }
+        break;
       case 'dash':
+        // dashing onto a weapon: grab it from the first dash frame, keep the dash going
+        if (this.buf.throw && !this.weapon && world.tryPickup(this)) this.buf.throw = 0;
+        // leniency: a dodge-button dash re-aims if the direction comes in a hair late (8-way)
+        if (this.dashLen && this.sf <= DODGE.lenient && (dx || dy)) {
+          const gy = this.ground ? Math.min(0, dy) : dy;
+          if ((dx || gy) && (dx !== sign(this.dashUX) || gy !== sign(this.dashUY)) && (gy >= 0 || this.airDash || !this.ground)) this.aimDash(dx, gy);
+        }
         if (this.sf >= 2 && this.tryActions(dx, dy, world, 0, true)) break;
-        if (this.sf < PHYS.dashT - 5) this.vx = this.dashDir * PHYS.dash;
-        else this.vx = approach(this.vx, this.dashDir * PHYS.run, 0.5);
+        // 8-way dash: velocity is locked along the dash vector (no gravity), then eases out
+        if (this.sf < PHYS.dashT - 5) {
+          this.vx = this.dashUX * PHYS.dash;
+          if (!this.ground) { this.vy = this.dashUY * PHYS.dash; this.gravScale = 0; }
+        } else {
+          if (this.sf === PHYS.dashT - 5 && !this.ground) this.vy *= 0.4;
+          this.vx = approach(this.vx, sign(this.dashUX) * PHYS.run, 0.5);
+        }
         if (this.sf % 2 === 0) this.addGhost();
-        if (this.sf % 4 === 0) world.dust(this.x - this.dashDir * 4, 0, 1, -this.dashDir);
-        if (this.sf >= PHYS.dashT) this.state = dx === this.dashDir ? 'run' : 'idle';
+        if (this.ground && this.sf % 4 === 0) world.dust(this.x - this.dashDir * 4, 0, 1, -this.dashDir);
+        if (this.sf >= PHYS.dashT) { this.state = !this.ground ? 'air' : dx === this.dashDir ? 'run' : 'idle'; this.sf = 0; }
         break;
       case 'attack': this.attacking(dx, dy, world); break;
       case 'dodge': this.dodging(dx, dy, world); break;
@@ -139,10 +245,25 @@ class Fighter {
         if (this.sf >= this.landT) this.state = 'idle';
         break;
       case 'hitstun':
+        if (this.tryBreakBurst(world)) break;
         this.stun--;
         if (this.ground) this.vx = approach(this.vx, 0, 0.45);
         else this.vx *= 0.955;
         if (this.stun <= 0) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; this.combo = 0; }
+        break;
+      case 'burst':
+        this.gravScale = this.sf < BURST.hover ? 0 : 1;
+        this.vx *= 0.85;
+        if (this.sf < BURST.hover) this.vy *= 0.5;
+        if (this.sf >= BURST.t) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; }
+        break;
+      case 'riposte':   // parried: hold the weapon on them; any input cancels it
+        if (this.tryActions(dx, dy, world, dtap, false)) break;
+        if (dx || (dy > 0 && this.ground)) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; break; }
+        if (this.ground) this.vx = approach(this.vx, 0, 0.5);
+        else this.vx *= 0.95;
+        if (this.ripTarget && Math.abs(this.ripTarget.x - this.x) > 1) this.facing = sign(this.ripTarget.x - this.x);
+        if (this.sf >= PARRY.riposte) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; }
         break;
       case 'ko':
         if (this.kill) killStep(this, world);   // weapon finisher (src/kills.js)
@@ -151,6 +272,7 @@ class Fighter {
     }
 
     this.physics(world);
+    this.trackFrames();
     this.animate();
     this.solve();
     this.stepScarf();
@@ -165,13 +287,14 @@ class Fighter {
     const b = this.buf;
     let [dx, dy] = b.light ? this.dirFor('light', dx0, dy0) : b.heavy ? this.dirFor('heavy', dx0, dy0) : b.throw ? this.dirFor('throw', dx0, dy0) : b.dodge ? this.dirFor('dodge', dx0, dy0) : [dx0, dy0];
     if (b.throw) {
-      b.throw = 0;
       if (this.weapon) {
+        b.throw = 0;
         if (this.ground && dy > 0) world.dropWeapon(this);
         else { this.throwDir = dy; if (dx) this.facing = dx; this.startMove(THROW_MOVE, { fromDash }); }
         return true;
       }
-      world.tryPickup(this);
+      // a missed grab stays buffered (PICKUP_BUF), so pressing a little early while running/dashing still picks up
+      if (world.tryPickup(this)) b.throw = 0;
     }
     if (b.light && this.startAttack(dx, dy, fromDash, false)) { b.light = 0; return true; }
     if (b.heavy) {
@@ -185,21 +308,22 @@ class Fighter {
         b.heavy = 0;
         // unarmed ground heavies (weapon ground heavies are signatures — not in this game)
         if (dx) this.facing = dx;
-        this.startMove(dy > 0 ? m.dheavy : dx ? m.sheavy : m.nheavy, { fromDash });
+        const hd = attackDir(dx, dy);
+        this.startMove(hd === 'd' ? m.dheavy : hd === 's' ? m.sheavy : m.nheavy, { fromDash });
         return true;
       }
     }
-    if (b.dodge && !fromDash && this.tryDodge(dx, dy, world)) { b.dodge = 0; return true; }
+    if (b.dodge && (!fromDash || (this.state === 'dash' && !this.fromChase)) && this.tryDodge(dx, dy, world)) { b.dodge = 0; return true; }
     if (b.jump) {
       if (this.ground) { b.jump = 0; this.doJump(dx, true, fromDash, world); return true; }
       if (this.jumps > 0) { b.jump = 0; this.jumps--; this.doJump(dx, false, false, world); return true; }
     }
-    if (dtap && this.ground && !fromDash) { this.startDash(dtap, world); return true; }
+    if (dtap && this.ground && !fromDash) { this.startDash(dtap, 0, world, false); return true; }
     return false;
   }
 
   doJump(dx, fromGround, fromDash, world) {
-    if (fromDash) this.vx = this.dashDir * PHYS.dash * 0.95;           // dash jump keeps momentum
+    if (fromDash) this.vx = (this.dashUX || this.dashDir) * PHYS.dash * 0.95;   // dash jump keeps momentum
     else if (dx && (sign(this.vx) !== dx || Math.abs(this.vx) < PHYS.air)) this.vx = dx * PHYS.air;
     else if (!dx) this.vx *= 0.6;
     this.vy = fromGround ? PHYS.jump : PHYS.airJump;
@@ -210,11 +334,22 @@ class Fighter {
     SFX.jump();
   }
 
-  startDash(dir, world) {
-    this.state = 'dash'; this.sf = 0; this.dashDir = dir; this.facing = dir;
-    this.vx = dir * PHYS.dash;
-    world.dust(this.x, 0, 4, -dir);
+  // 8-way dash along (ux, uy). Upward dashes from the ground and any air dash use the one air dash
+  // per airtime (reset on landing or getting hit). lenient = came from the dodge button, may re-aim.
+  startDash(ux, uy, world, lenient) {
+    this.state = 'dash'; this.sf = 0; this.dashLen = !!lenient; this.fastfall = false;
+    if (this.ground) world.dust(this.x, 0, 4, -(sign(ux) || this.facing));
+    else world.ring(this.x, this.y - 18, 10);
+    this.aimDash(ux, uy);
     SFX.dash();
+  }
+  aimDash(ux, uy) {
+    const n = Math.hypot(ux, uy) || 1;
+    this.dashUX = ux / n; this.dashUY = uy / n;
+    this.dashDir = sign(ux) || this.facing; if (ux) this.facing = sign(ux);
+    if (!this.ground || this.dashUY < 0) this.airDash = false;
+    this.vx = this.dashUX * PHYS.dash; this.vy = this.dashUY * PHYS.dash;
+    if (this.vy < 0) this.ground = false;
   }
 
   tryDodge(dx, dy, world) {
@@ -223,28 +358,94 @@ class Fighter {
       this.chaseN--;
       const ddy = this.ground ? Math.min(0, dy) : dy;
       if (dx || ddy) { const n = Math.hypot(dx, ddy); this.startDodge('dir', dx / n, ddy / n, true, world); }
-      else this.startDodge(this.ground ? 'spot' : 'air', 0, 0, true, world);
+      else if (!this.ground) this.startDodge('air', 0, 0, true, world);
+      else { this.chaseN++; return this.tryBurst(world); }   // neutral on the ground = burst, not a chase dodge
       return true;
     }
     if (this.clock < this.dodgeLock) return false;                        // just whiffed an attack
-    if (this.ground && dx) { this.startDash(dx, world); return true; }   // ground dodge + side = dash
-    if (this.dodgeCD > 0) return false;
-    if (this.ground) { this.startDodge('spot', 0, 0, false, world); return true; }
-    if (!this.airDodge) return false;
-    this.airDodge = false; this.airDodgeAt = this.clock; this.gcUsed = false;
-    if (dx || dy) { const n = Math.hypot(dx, dy); this.startDodge('dir', dx / n, dy / n, false, world); }
-    else this.startDodge('air', 0, 0, false, world);
+    // 8-way: dodge + any direction. With dodge ready it's an invincible dodge that way;
+    // on cooldown it's a dash that way instead (no invincibility).
+    if (this.ground) {
+      // can't go into the floor: down-diagonals roll. No spot dodge: neutral / straight down = burst (full bar)
+      // (the press stays buffered, so a direction a moment later still rolls). Tap down to parry instead.
+      const gy = Math.min(0, dy);
+      if (!dx && !gy) return this.tryBurst(world);   // neutral = burst (needs a full bar)
+      if (this.dodgeCD === 0) {
+        if (gy < 0) this.startGroundDir(dx, gy, world);
+        else this.startDodge('roll', dx, 0, false, world);
+        return true;
+      }
+      if (!(dx || gy) || this.state === 'dash' || (gy < 0 && !this.airDash)) return false;
+      this.startDash(dx, gy, world, true);
+      return true;
+    }
+    if (this.dodgeCD === 0 && this.airDodge) {
+      this.airDodge = false; this.airDodgeAt = this.clock; this.gcUsed = false;
+      if (dx || dy) { const n = Math.hypot(dx, dy); this.startDodge('dir', dx / n, dy / n, false, world); }
+      else this.startDodge('air', 0, 0, false, world);
+      return true;
+    }
+    if (!dx && !dy) return this.tryBurst(world);   // air dodge used: neutral = burst
+    if ((dx || dy) && this.airDash && this.state !== 'dash') { this.startDash(dx, dy, world, true); return true; }
+    return false;
+  }
+
+  // ground dodge up / up-diagonal: an invincible directional dodge that lifts off (ground cooldown, keeps the air dodge)
+  startGroundDir(dx, gy, world) {
+    const n = Math.hypot(dx, gy);
+    this.startDodge('dir', dx / n, gy / n, false, world);
+    this.dodgeCD = DODGE.airDirT + DODGE.groundCD;
+    this.ground = false;
+  }
+
+  // ---------------- burst ----------------
+  burstReady() { return this.burst >= BURST.max; }
+  tryBurst(world) { if (!this.burstReady()) return false; this.startBurst(world); return true; }
+  // in hitstun / blockstun: a neutral dodge press breaks out (combo breaker)
+  tryBreakBurst(world) {
+    if (!this.buf.dodge || !this.burstReady()) return false;
+    const [bx, by] = this.bufDir.dodge;
+    if (bx || by) return false;
+    this.buf.dodge = 0;
+    this.startBurst(world);
     return true;
+  }
+  startBurst(world) {
+    Object.assign(this, {
+      burst: 0, state: 'burst', sf: 0, inv: BURST.inv, move: null, part: null, rf: -1, af: -1, gc: false, stun: 0,
+      fastfall: false, combo: 0, cInst: null, cIds: null,
+      // refresh air options, like YOMI's burst
+      jumps: PHYS.airJumps, recAvail: true, airDodge: true, airDash: true,
+    });
+    this.vx *= 0.2; this.vy = Math.min(this.vy, 0) * 0.2;
+    this.trail.length = 0;
+    world.burst(this);
+  }
+
+  // ---------------- defence ----------------
+  startBlock(dx, world) {
+    this.state = 'block'; this.sf = 0;
+    if (dx) this.facing = dx;
+    else { const op = this.opponent(world); if (op && op.x !== this.x) this.facing = sign(op.x - this.x); }
+  }
+
+  // tap-down parry: the weapon's parry move; its deflect startup is the parry window
+  startParry() {
+    this.startMove(this.wpn.moves.parry);
+    this.parryCD = PARRY.win + PARRY.cd;
+  }
+  parrying() {
+    return this.state === 'attack' && this.move.kind === 'parry' && this.rf < 0 && this.pi === 0 && this.pf <= PARRY.win;
   }
 
   startDodge(kind, ux, uy, chase, world) {
     this.state = 'dodge'; this.dodgeKind = kind; this.sf = 0; this.chaseDodge = chase; this.fastfall = false;
     if (chase) { this.inv = DODGE.chaseInv; this.dodgeT = DODGE.chaseT; }
-    else if (kind === 'spot') { this.inv = DODGE.groundInv; this.dodgeT = DODGE.groundT; this.dodgeCD = DODGE.groundT + DODGE.groundCD; }
     else if (kind === 'air') { this.inv = DODGE.airSpotInv; this.dodgeT = DODGE.airSpotT; this.dodgeCD = DODGE.airCD; }
+    else if (kind === 'roll') { this.inv = DODGE.rollInv; this.dodgeT = DODGE.rollT; this.dodgeCD = DODGE.rollT + DODGE.groundCD; }
     else { this.inv = DODGE.airDirInv; this.dodgeT = DODGE.airDirT; this.dodgeCD = DODGE.airCD; }
-    if (kind === 'dir') { this.vx = ux * 6.4; this.vy = uy * 6.4; if (ux) this.facing = sign(ux); }
-    else if (kind === 'spot') this.vx *= 0.3;
+    if (kind === 'dir') { this.vx = ux * DODGE.airDirSpd; this.vy = uy * DODGE.airDirSpd; if (ux) this.facing = sign(ux); }
+    else if (kind === 'roll') { this.vx = ux * DODGE.rollSpd; this.dashDir = sign(ux); this.facing = sign(ux); }
     else { this.vx *= 0.4; this.vy = 0; }
     world.ring(this.x, this.y - 20, 14);
     SFX.dodge();
@@ -260,16 +461,26 @@ class Fighter {
     // chase dodges can be cancelled into an attack
     if (this.chaseDodge && this.sf >= 1 && (this.buf.light || this.buf.heavy)) {
       const prev = this.state;
-      this.state = this.ground ? 'idle' : 'air'; this.fromChase = true; this.dashDir = sign(this.vx) || this.facing;
+      this.state = this.ground ? 'idle' : 'air'; this.fromChase = true; this.dashDir = sign(this.vx) || this.facing; this.dashUX = this.dashDir;
       const ok = this.tryActions(dx, dy, world, 0, true);
       this.fromChase = false;
       if (ok) { this.inv = 0; return; }
       this.state = prev;
     }
+    // leniency: dodge pressed a hair before the direction still comes out directional
+    if (!this.chaseDodge && this.sf <= DODGE.lenient && k === 'air') {
+      if (dx || dy) { const n = Math.hypot(dx, dy); this.upgradeDodge('dir', dx / n, dy / n); return; }
+    }
     if (k === 'dir') {
-      if (this.sf < 13) this.gravScale = 0;
-      else { if (this.sf === 13) { this.vx *= 0.35; this.vy *= 0.35; } this.gravScale = 0.5; }
+      const mv = this.chaseDodge ? 13 : DODGE.airDirMove;
+      if (this.sf < mv) this.gravScale = 0;
+      else { if (this.sf === mv) { this.vx *= 0.35; this.vy *= 0.35; } this.gravScale = 0.5; }
       if (this.sf % 2 === 0) this.addGhost();
+    } else if (k === 'roll') {
+      if (this.sf < DODGE.rollMove) this.vx = this.dashDir * DODGE.rollSpd;
+      else this.vx = approach(this.vx, 0, 0.7);
+      if (this.sf % 2 === 0) this.addGhost();
+      if (this.sf % 4 === 0) world.dust(this.x - this.dashDir * 4, 0, 1, -this.dashDir);
     } else if (k === 'air') {
       this.gravScale = 0.08;
       this.vx *= 0.92;
@@ -281,6 +492,19 @@ class Fighter {
       }
     } else this.vx = approach(this.vx, 0, 0.5);
     if (this.sf >= this.dodgeT) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; }
+  }
+
+  // turn a just-started neutral dodge into a directional one (keeps the frames already spent)
+  upgradeDodge(kind, ux, uy) {
+    const spent = this.sf;
+    this.dodgeKind = kind;
+    if (kind === 'roll') {
+      this.inv = Math.max(1, DODGE.rollInv - spent); this.dodgeT = DODGE.rollT; this.dodgeCD = DODGE.rollT + DODGE.groundCD - spent;
+      this.vx = ux * DODGE.rollSpd; this.dashDir = sign(ux); this.facing = sign(ux);
+    } else {
+      this.inv = Math.max(1, DODGE.airDirInv - spent); this.dodgeT = DODGE.airDirT;
+      this.vx = ux * DODGE.airDirSpd; this.vy = uy * DODGE.airDirSpd; if (ux) this.facing = sign(ux);
+    }
   }
 
   // ---------------- attacks ----------------
@@ -298,7 +522,7 @@ class Fighter {
 
   pickLight(dx, dy, gc, chain) {
     const W = this.wpn, m = W.moves, grounded = this.ground || gc;
-    const dir = dy > 0 ? 'd' : dx ? 's' : 'n';
+    const dir = attackDir(dx, dy);
     if (!grounded) return m[dir + 'air'];
     if (!W.chain) return m[dir + 'light'];
     const keep = this.chain; this.chain = chain;
@@ -320,8 +544,8 @@ class Fighter {
   }
 
   startMove(m, o = {}) {
-    this.state = 'attack'; this.move = m; this.moveInst = ++MOVE_INST; this.sf = 0; this.lenient = null;
-    this.moveHit = false; this.rf = -1; this.gc = !!o.gc; this.weakRec = !!o.weak; this.landedAir = false;
+    this.state = 'attack'; this.move = m; this.moveInst = ++MOVE_INST; this.sf = 0; this.lenient = null; this.buf.down = 0;
+    this.moveHit = false; this.moveBlocked = false; this.rf = -1; this.gc = !!o.gc; this.weakRec = !!o.weak; this.landedAir = false;
     this.charge = 0; this.chargeMul = 1;
     this.trail.length = 0;
     if (this.ground && !o.fromDash && m.kind !== 'throw') this.vx *= 0.4;
@@ -348,13 +572,28 @@ class Fighter {
   advance() {
     const m = this.move, nx = m.parts[this.pi + 1];
     if (nx && (!nx.cond || this.partHit)) { this.enterPart(this.pi + 1); return; }
-    this.rf = 0; this.af = -1; this.recLen = this.moveHit ? Math.ceil(m.r * REC_ON_HIT) : m.r;
+    // recovery: shorter on hit, base on block, longer on a whiff
+    this.rf = 0; this.af = -1;
+    this.recLen = this.moveHit ? Math.ceil(m.r * REC_ON_HIT) : this.moveBlocked || m.kind !== 'atk' ? m.r : Math.ceil(m.r * RECOVERY.whiff);
     if (this.landedAir) this.recLen = Math.max(this.recLen, m.land);
     this.recFrom = this.pose.slice();
   }
 
   attacking(dx, dy, world) {
     const m = this.move;
+    if (m.kind === 'parry' && this.rf < 0 && this.pi === 0) {
+      // down + attack/throw/dodge a hair after the tap: drop the parry, do the down move (refund it)
+      if (this.pf <= PARRY.lenient && (this.buf.light || this.buf.heavy || this.buf.throw || this.buf.dodge)) {
+        this.parryCD = 0; this.move = null; this.part = null; this.state = 'idle'; this.sf = 0;
+        if (!this.tryActions(dx, dy, world, 0, false) && dy > 0) this.startBlock(dx, world);
+        return;
+      }
+      // still holding down when the window closes: it was a block, not a tap
+      if (this.pf >= PARRY.win && dy > 0) {
+        this.move = null; this.part = null; this.af = -1; this.startBlock(dx, world);
+        return;
+      }
+    }
     if (this.rf >= 0) {
       this.af = -1;
       // greatsword: a connected opener/bridge can be cancelled into the next link
@@ -390,7 +629,8 @@ class Fighter {
       // only upgrade (neutral -> directional / side <-> down); releasing the stick never downgrades
       if ((this.ground === L.ground || L.gc) && (dx || dy > 0)) {
         const mv = this.pickLight(dx, dy, L.gc, L.chain);
-        if (mv !== this.move) {
+        // a late up-diagonal resolves to neutral: never let it downgrade a side/down light
+        if (mv !== this.move && attackDir(dx, dy) !== 'n') {
           this.chain = L.chain;
           if (dx) this.facing = dx;
           const keepPose = this.partFrom;
@@ -469,6 +709,7 @@ class Fighter {
     this.move = null; this.part = null; this.gc = false; this.rf = -1; this.af = -1;
     this.state = this.ground ? 'idle' : 'air';
     this.sf = 0;
+    if (m && m.kind === 'parryAtk' && this.ripTarget) this.state = 'riposte';   // parry attack -> riposte pose
   }
 
   airControl(dx, mul) {
@@ -498,7 +739,7 @@ class Fighter {
   }
 
   onLand(world, impact) {
-    this.jumps = PHYS.airJumps; this.recAvail = true; this.airDodge = true; this.fastfall = false;
+    this.jumps = PHYS.airJumps; this.recAvail = true; this.airDodge = true; this.airDash = true; this.fastfall = false;
     // air dodge cooldown: landing 75f+ after the dodge clears it, sooner leaves the rest of 75f
     if (this.airDodgeAt >= 0) {
       const el = this.clock - this.airDodgeAt;
@@ -540,7 +781,7 @@ class Fighter {
         }
         break;
       case 'dodge':
-        if (this.dodgeKind !== 'spot') { this.state = 'idle'; this.sf = 0; }
+        if (this.dodgeKind !== 'roll') { this.state = 'idle'; this.sf = 0; }
         break;
       case 'ko':
         if (this.kill && killLand(this, world, impact)) break;
@@ -585,8 +826,19 @@ class Fighter {
       case 'dash': target = P(POSE.dash, this.wpn.RUN || st); k = 0.55; break;   // keep the running carry (drag / lowered) through the dash
       case 'air': target = P(this.vy < 0 ? POSE.rise : POSE.fall, st); k = 0.22; break;
       case 'land': target = P(POSE.land, st); k = 0.5; break;
-      case 'dodge': target = P(this.dodgeKind === 'dir' ? POSE.tuck : POSE.spot, st); k = 0.5; break;
-      case 'hitstun': target = P(this.ground ? POSE.hurtLo : POSE.hurt, st); k = 0.6; break;
+      case 'dodge': target = P(this.dodgeKind === 'dir' || this.dodgeKind === 'roll' ? POSE.tuck : POSE.spot, st); k = 0.5; break;
+      case 'block': target = P(POSE.guard, st); k = 0.5; break;
+      case 'blockstun': target = P(POSE.guard, st); target[0] -= 6; k = 0.7; break;
+      case 'hitstun':
+        target = P(this.ground ? POSE.hurtLo : POSE.hurt, st); k = 0.6; break;
+      case 'burst': target = P(POSE.burst, st); k = this.sf < 3 ? 0.8 : 0.35; break;
+      case 'riposte': {
+        // lunge stance, weapon arm straight and the tip aimed at the enemy's chest
+        const tg = this.ripTarget, sh = this.sk ? this.sk.neck : [this.x, this.y - 26];
+        const ang = tg ? clamp(Math.atan2(tg.y - 18 - sh[1], Math.abs(tg.x - this.x) || 1) / D2R, -55, 55) : 0;
+        target = P({ ...POSE.riposte, a: [ang + 6, ang], w: ang }, st);
+        k = this.sf < 4 ? 0.8 : 0.45; break;
+      }
       case 'ko': { const [kp, kk] = killPose(this); target = P(kp, st); k = kk; break; }
       default: target = st.slice();
     }
@@ -721,6 +973,30 @@ class Fighter {
         for (let i = 1; i < n; i++) if (p[i][1] > floorY) p[i][1] = floorY;
       }
     });
+  }
+
+  // ---------------- frame data (recovery-frame system / frame meter) ----------------
+  // fhist: phase of each of the last FRAME_HIST frames. fd counts startup/active/recovery of the
+  // current move (or dodge/parry); lastFD keeps the finished one for the HUD readout.
+  trackFrames() {
+    const ph = this.phase(true);
+    this.fhist.push(this.phase());
+    if (this.fhist.length > FRAME_HIST) this.fhist.shift();
+    const act = this.state === 'attack' || this.state === 'dodge';
+    if (act) {
+      const key = this.state === 'attack' ? this.moveInst : this.state + this.clock;
+      if (!this.fd || (this.state === 'attack' && this.fd.key !== key) || (this.state !== 'attack' && this.fd.kind !== this.state)) {
+        this.fd = { key, kind: this.state, name: this.state === 'attack' ? this.move.id || this.move.kind : this.dodgeKind, s: 0, a: 0, r: 0, i: 0 };
+      }
+      const d = this.fd;
+      if (ph === 'startup') d.s++;
+      else if (ph === 'active') d.a++;
+      else if (ph === 'inv') d.i++;
+      else if (ph === 'recovery') d.r++;
+    } else if (this.fd) {
+      if (this.state !== 'hitstun') this.lastFD = this.fd;   // an interrupted move isn't reported
+      this.fd = null;
+    }
   }
 
   addGhost() {

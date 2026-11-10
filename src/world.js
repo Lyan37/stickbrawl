@@ -18,21 +18,123 @@ class World {
       for (const vic of fighters) {
         if (vic === att || vic.inv > 0 || vic.state === 'ko') continue;
         const hb = vic.hurtbox();
-        if (!overlap(box, hb)) continue;
+        // a parry attack always connects with the fighter it was parried off (they're held in the stagger)
+        const riposte = att.move.kind === 'parryAtk' && vic === att.ripTarget && Math.abs(vic.x - att.x) < 90 && Math.abs(vic.y - att.y) < 80;
+        if (!overlap(box, hb) && !riposte) continue;
         const px = (Math.max(box.x, hb.x) + Math.min(box.x + box.w, hb.x + hb.w)) / 2;
         const py = (Math.max(box.y, hb.y) + Math.min(box.y + box.h, hb.y + hb.h)) / 2;
         hits.push([att, vic, att.part, att.facing, px, py]);
       }
     }
     // apply simultaneously so trades are fair
-    for (const h of hits) this.applyHit(h[0], h[1], h[2], h[3], h[4], h[5], false);
+    for (const h of hits) {
+      if (h[1].state === 'ko') continue;
+      if (this.defend(h[0], h[1], h[2], h[3], h[4], h[5], null)) continue;
+      this.applyHit(h[0], h[1], h[2], h[3], h[4], h[5], false);
+    }
+  }
+
+  // ---------------- defence: parry & crouch block ----------------
+  // proj = the projectile when it's a ranged/thrown hit. Returns true if the hit was stopped.
+  defend(att, vic, spec, dir, px, py, proj) {
+    if (vic.parrying()) { this.parry(att, vic, px, py, proj); return true; }
+    if (!vic.crouching || !vic.ground) return false;
+    // only hits from the front; ground pounds are overheads and go straight through a crouch block
+    const fromFront = proj ? sign(proj.vx) === -vic.facing || proj.vx === 0 : (sign(att.x - vic.x) || -dir) === vic.facing;
+    if (!fromFront || (!proj && att.move && att.move.kind === 'gp')) return false;
+    const dmg = spec.dmg * (proj ? 1 : att.chargeMul || 1), chip = dmg * GUARD.chip;
+    if (vic.hp - chip <= 0) return false;   // chip KO: let it land as a real hit (and finisher)
+    vic.hp -= chip;
+    Object.assign(vic, { state: 'blockstun', sf: 0, stun: Math.max(GUARD.stunMin, Math.round(spec.stun * GUARD.stun)), vx: dir * GUARD.push, blockFlash: 8 });
+    vic.hitstop = GUARD.stop;
+    if (!proj) {
+      att.moveBlocked = true; att.hitCount++; att.lastHitF = att.af; att.hitstop = GUARD.stop;
+      if (att.ground) att.vx = -dir * GUARD.attPush;
+      else att.vx *= 0.5;
+    }
+    this.fx.push({ k: 'guard', x: vic.x + vic.facing * 9, y: vic.y - 15, f: vic.facing, t: 0, life: 10 });
+    for (let i = 0; i < 3 + Math.round(dmg / 2); i++) {
+      const a2 = rand(-1.2, 1.2) + (vic.facing === 1 ? 0 : Math.PI);
+      this.parts.push({ x: px, y: py, vx: Math.cos(a2) * rand(1, 3), vy: Math.sin(a2) * rand(1, 3) - 0.5, life: randi(8, 14), t: 0, s: 2, col: pick([PAL.cyan, PAL.smear, '#ffffff']), floaty: 1 });
+    }
+    this.game.shake(1);
+    SFX.block(dmg);
+    return true;
+  }
+
+  // burst: shockwave that knocks the opponent back a little for chip damage (never lethal), unless they're
+  // invincible or out of range
+  burst(f) {
+    const g = this.game;
+    for (const o of g.fighters) {
+      if (o === f || o.state === 'ko' || o.inv > 0) continue;
+      const dx = o.x - f.x, dy = (o.y - 18) - (f.y - 18);
+      if (Math.hypot(dx, dy) > BURST.radius) continue;
+      const dir = sign(dx) || -o.facing;
+      o.hp = Math.max(1, o.hp - BURST.chip);
+      Object.assign(o, {
+        state: 'hitstun', sf: 0, move: null, part: null, rf: -1, gc: false, fastfall: false, chain: null,
+        stun: BURST.stun, hitstop: BURST.stop, flash: BURST.stop + 2, vx: dir * BURST.push, vy: BURST.pushUp, facing: -dir,
+        cInst: null, cIds: null, combo: 0,
+      });
+      o.ground = false; o.trail.length = 0; o.comboShow = null;
+    }
+    f.hitstop = BURST.stop;
+    this.fx.push({ k: 'burst', x: f.x, y: f.y - 18, t: 0, life: 18 });
+    this.fx.push({ k: 'ring', x: f.x, y: f.y - 18, r: BURST.radius, t: 0, life: 14 });
+    for (let i = 0; i < 18; i++) {
+      const a = (i / 18) * Math.PI * 2, sp = rand(2.5, 4.5);
+      this.parts.push({ x: f.x, y: f.y - 18, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: randi(12, 20), t: 0, s: 2, ring: Math.random() < 0.5, col: pick([PAL.accent, PAL.cyan, '#ffffff']), floaty: 1 });
+    }
+    g.shake(5);
+    g.screenFlash(PAL.accent, 10, 0.35);   // burst = cyan screen flash
+    SFX.burst();
+  }
+
+  parry(att, vic, px, py, proj) {
+    // the parrier's deflect is cancelled; a few invincible frames, and the cooldown resets.
+    // Melee: the weapon's parry attack fires at the attacker (then riposte pose). Projectile: riposte pose.
+    Object.assign(vic, {
+      state: 'riposte', sf: 0, move: null, part: null, rf: -1, af: -1, gc: false, ripTarget: proj ? null : att,
+      parryCD: 0, inv: PARRY.inv, hitstop: PARRY.stop, blockFlash: 12, stun: 0,
+    });
+    if (!proj && att.x !== vic.x) vic.facing = sign(att.x - vic.x);
+    vic.trail.length = 0;
+    if (!proj) {
+      const atk = vic.wpn.moves.parryAtk, hb = atk.parts[0].hb;
+      vic.startMove(atk, { fromDash: true });
+      // lunge in if they're past the swing's reach, arriving as it lands
+      const gap = Math.abs(att.x - vic.x) - (hb[0] + hb[2] - 8);
+      if (gap > 0) vic.vx = vic.facing * Math.min(9, gap / atk.parts[0].s + 0.5);
+    }
+    if (!proj) {
+      // melee: the attack is cancelled and the attacker reels, wide open
+      const away = sign(att.x - vic.x) || -vic.facing;
+      Object.assign(att, {
+        state: 'hitstun', sf: 0, move: null, part: null, rf: -1, gc: false, fastfall: false, chain: null,
+        stun: PARRY.stun, hitstop: PARRY.stop, vx: away * 0.6, vy: att.ground ? 0 : -1.5, cInst: null, cIds: null, combo: 0,
+      });
+      att.trail.length = 0;
+      if (att.vy < 0) att.ground = false;
+    } else if (proj.type !== 'thrown') {   // (thrown weapons just drop: projHit turns them into a pickup)
+      // projectiles are batted straight back and now belong to the parrier
+      proj.vx = -proj.vx * 1.1; proj.vy = -Math.abs(proj.vy) * 0.3; proj.owner = vic; proj.minst = -1; proj.dist = 0;
+      proj.life = Math.max(proj.life, 30);
+    }
+    this.fx.push({ k: 'parry', x: px, y: py, t: 0, life: 16 });
+    this.game.shake(3);
+    this.game.screenFlash('#ffffff', 12, 0.7);   // parry = white screen flash
+    SFX.parry();
   }
 
   applyHit(att, vic, spec, dir, px, py, isProj) {
     const g = this.game;
     const wasStun = vic.state === 'hitstun';
-    const dmg = spec.dmg * (isProj ? 1 : att.chargeMul || 1);
+    // recovery-frame system: catching someone in their recovery frames is a punish
+    const punish = vic.inRecovery();
+    const dmg = spec.dmg * (isProj ? 1 : att.chargeMul || 1) * (punish ? RECOVERY.punishDmg : 1);
     vic.hp = Math.max(0, vic.hp - dmg);
+    if (punish) g.screenFlash(PAL.red, 12, 0.45);   // punish = red screen flash
 
     // scythe-style side swap / carry
     if (!isProj && (spec.carry || spec.behind)) {
@@ -64,11 +166,14 @@ class World {
     const stunMul = this.comboStun(att, vic, spec, isProj, wasStun);
     Object.assign(vic, {
       state: 'hitstun', sf: 0, move: null, part: null, rf: -1, gc: false, fastfall: false,
-      stun: Math.round(spec.stun * 1.45 * stunMul), facing: -dir, recAvail: true, airDodge: true, chain: null,
+      stun: Math.round(spec.stun * HITSTUN_MUL * stunMul * (punish ? RECOVERY.punishStun : 1)), facing: -dir, recAvail: true, airDodge: true, airDash: true, chain: null,
     });
     if (vic.jumps === 0) vic.jumps = 1;   // hit while out of jumps: get one back
     vic.trail.length = 0;
     vic.combo = wasStun ? vic.combo + 1 : 1;
+    // burst meter: taking damage fills it faster than dealing it
+    vic.burst = Math.min(BURST.max, vic.burst + dmg * BURST.onHurt);
+    att.burst = Math.min(BURST.max, att.burst + dmg * BURST.onHit);
     if (vic.combo >= 2) att.comboShow = { n: vic.combo, t: 100 };
 
     const stop = Math.min(14, 3 + Math.round(dmg * 0.8));
@@ -169,7 +274,14 @@ class World {
         hit = sx > hb.x - 3 && sx < hb.x + hb.w + 3 && sy > hb.y - 3 && sy < hb.y + hb.h + 3;
       }
       if (hit) {
-        this.applyHit(p.owner, f, p, sign(p.vx) || p.owner.facing, p.x, Math.min(0, p.y), true);
+        const dir = sign(p.vx) || p.owner.facing, py = Math.min(0, p.y);
+        if (this.defend(p.owner, f, p, dir, p.x, py, p)) {
+          if (p.owner === f) return true;            // parried: it now flies back at the shooter
+          if (p.type === 'thrown') this.toPickup(p, true);
+          else p.dead = true;
+          return true;
+        }
+        this.applyHit(p.owner, f, p, dir, p.x, py, true);
         if (p.type === 'thrown') this.toPickup(p, true);
         else p.dead = true;
         return true;
@@ -217,20 +329,23 @@ class World {
     this.pickups.push({ type, x, y, vx, vy, sky, hidden: sky, falling: true, life: 1800, t: 0 });
   }
 
+  // grab reach leans into your movement, so a weapon you're running/dashing at is caught a few frames early
   tryPickup(f) {
+    const lead = clamp(f.vx * 3, -24, 24);
+    const lo = f.x - 20 + Math.min(0, lead), hi = f.x + 20 + Math.max(0, lead);
+    let best = -1, bd = 1e9;
     for (let i = 0; i < this.pickups.length; i++) {
-      const p = this.pickups[i];
-      const dy = p.y - f.y;
-      if (Math.abs(p.x - f.x) < 20 && dy > -52 && dy < 18) {
-        f.weapon = p.type;
-        this.pickups.splice(i, 1);
-        this.ring(p.x, p.y - 6, 16);
-        this.fx.push({ k: 'label', x: f.x, y: f.y - 54, t: 0, life: 40, s: WEAPONS[p.type].name });
-        SFX.pickup();
-        return true;
-      }
+      const p = this.pickups[i], dy = p.y - f.y, d = Math.abs(p.x - f.x);
+      if (p.x > lo && p.x < hi && dy > -52 && dy < 18 && d < bd) { best = i; bd = d; }
     }
-    return false;
+    if (best < 0) return false;
+    const p = this.pickups[best];
+    f.weapon = p.type;
+    this.pickups.splice(best, 1);
+    this.ring(p.x, p.y - 6, 16);
+    this.fx.push({ k: 'label', x: f.x, y: f.y - 54, t: 0, life: 40, s: WEAPONS[p.type].name });
+    SFX.pickup();
+    return true;
   }
 
   updatePickups(fighters, camX) {
@@ -281,13 +396,13 @@ class World {
     const h = f.sk.handA, d = f.sk.wdir;
     const bx = h[0] - d[0] * 10, by = h[1] - d[1] * 10;
     for (let i = 0; i < 2; i++) {
-      this.parts.push({ x: bx + rand(-1, 1), y: by + rand(-1, 1), vx: -d[0] * rand(2, 4) + f.vx * 0.3, vy: -d[1] * rand(2, 4) + rand(-0.5, 0.5), life: randi(6, 12), t: 0, s: randi(2, 3), nograv: 1, col: pick([PAL.yellow, PAL.orange, PAL.orange, PAL.red]), ring: Math.random() < 0.3 });
+      this.parts.push({ x: bx + rand(-1, 1), y: by + rand(-1, 1), vx: -d[0] * rand(2, 4) + f.vx * 0.3, vy: -d[1] * rand(2, 4) + rand(-0.5, 0.5), life: randi(6, 12), t: 0, s: randi(2, 3), nograv: 1, col: pick([PAL.hot, PAL.orange, PAL.orange, PAL.red]), ring: Math.random() < 0.3 });
     }
   }
   hitSpark(x, y, dmg, ang) {
     this.fx.push({ k: 'spark', x, y, t: 0, life: 8 + Math.floor(dmg / 2), size: 7 + dmg * 1.3, rot: rand(0, 6.28), seed: rand(0, 100) });
     if (dmg >= 7) this.fx.push({ k: 'orb', x, y, r: 8 + dmg, t: 0, life: 14 });
-    const cols = [PAL.yellow, PAL.yellow, PAL.orange, PAL.red];
+    const cols = [PAL.hot, PAL.hot, PAL.orange, PAL.red];
     for (let i = 0; i < 4 + dmg; i++) {
       const a2 = ang + rand(-0.9, 0.9), sp = rand(1.5, 4.5);
       this.parts.push({ x, y, vx: Math.cos(a2) * sp, vy: Math.sin(a2) * sp - 0.8, life: randi(12, 24), t: 0, s: randi(2, 3), ring: Math.random() < 0.7, col: pick(cols), floaty: 1 });

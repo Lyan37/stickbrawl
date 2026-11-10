@@ -26,7 +26,8 @@ function hash(n) {
 // ---------- palette (YOMI-style: black void, flat pastel fighters, hot effect colours) ----------
 const PAL = {
   bg: '#0b0c0f', floor: '#ffffff', ink: '#ffffff', mid: '#6e6f71', dim: '#37383a', light: '#c5c5c5',
-  yellow: '#ffd519', pale: '#f2ff31', orange: '#ff7c20', red: '#ff333d', steel: '#6d8696', steelD: '#41525c',
+  // no yellow in this game: accent = UI highlight (bright cyan), hot = warm spark/fire tone, hp = HP fill
+  accent: '#7fe0ff', hot: '#ff8a5c', hp: '#eef2f7', orange: '#ff7c20', red: '#ff333d', steel: '#6d8696', steelD: '#41525c',
   smear: '#a4c1d5', cyan: '#94e4ff', magenta: '#d540b7', crimson: '#84001f', hpWell: '#000000',
 };
 const PCOL = ['#ada2ff', '#ff7b81'];   // body

@@ -25,12 +25,16 @@ const Game = {
   cpuLevel: 1,
   menuIdx: 0,
   showControls: false,
+  frameData: false,       // frame meter overlay (recovery-frame system)
   ctrlRow: 0, ctrlCol: 0, rebinding: false, ctrlMsg: '', ctrlMsgT: 0,
   t: 0, timer: 0, round: 1, phaseT: 0, slow: 0, invert: 0, shakeAmt: 0,
   fighters: [new Fighter(0), new Fighter(1)],
   ctrls: [NULL_CTRL, NULL_CTRL],
   koWinner: null, koText: '', koSub: '', demoReset: 0, speed: { t: 0, ang: 0 },
   shake(a) { this.shakeAmt = Math.max(this.shakeAmt, a); },
+  // full-screen colour flash that fades out over `life` frames (parry = white, punish = red)
+  flash: null,
+  screenFlash(col, life, alpha) { if (this.mode !== 'title') this.flash = { col, life, alpha, t: 0 }; },
   speedLines(ang, t = 16) { this.speed = { t: Math.max(this.speed.t, t), ang }; },
   onKO(vic, att, style) {
     this.slow = 60;
@@ -71,7 +75,9 @@ function setupMatch(players) {
   const [a, b] = Game.fighters;
   a.wins = b.wins = 0;
   if (players === 'pvp') {
-    Game.ctrls = [new Controller([KEYMAPS.p1], 0), new Controller([KEYMAPS.p2], 1)];
+    // default split: P1 on the keyboard, P2 on the first gamepad (P2 keys still work as a fallback,
+    // and a second gamepad goes to P1)
+    Game.ctrls = [new Controller([KEYMAPS.p1], 1), new Controller([KEYMAPS.p2], 0)];
     a.name = 'P1'; b.name = 'P2';
   } else if (players === 'cpu') {
     Game.ctrls = [new Controller([KEYMAPS.p1, KEYMAPS.p2], 0), new AIController(Game.cpuLevel)];
@@ -96,6 +102,7 @@ function startRound() {
   Game.world.reset();
   Cam.x = 0; Cam.z = ZMAX; Cam.oy = 0;
   for (let i = 0; i < 2; i++) if (Game.ctrls[i].bind) Game.ctrls[i].bind(Game.fighters[i], Game.fighters[1 - i], Game.world);
+  Game.flash = null;
   Game.timer = 99 * 60; Game.phaseT = 0; Game.slow = 0; Game.koWinner = null; Game.demoReset = 0;
   Game.mode = Game.players === 'demo' ? 'title' : 'intro';
   if (Game.mode === 'title') Cam.x = -TITLE_SHIFT / Cam.z;
@@ -172,6 +179,7 @@ function simStep() {
   if (Game.speed.t > 0) Game.speed.t--;
   updateCamera(fs);
   if (Game.invert > 0) Game.invert--;
+  if (Game.flash && ++Game.flash.t >= Game.flash.life) Game.flash = null;
 
   switch (Game.mode) {
     case 'intro':
@@ -220,6 +228,7 @@ function titleItems() {
     { label: 'LOCAL 2P' },
     { label: 'CPU LEVEL', value: AI_LEVELS[Game.cpuLevel].name, opt: true },
     { label: 'SOUND', value: SFX.muted ? 'OFF' : 'ON', opt: true },
+    { label: 'FRAME DATA', value: Game.frameData ? 'ON' : 'OFF', opt: true },
     { label: 'CONTROLS' },
   ];
 }
@@ -235,25 +244,30 @@ function titleInput() {
   const ok = menuOk();
   if (Game.menuIdx === 2 && (lr || ok)) { Game.cpuLevel = (Game.cpuLevel + (lr || 1) + 3) % 3; SFX.select(); }
   if (Game.menuIdx === 3 && (lr || ok)) { SFX.toggle(); SFX.select(); }
-  if (Game.menuIdx === 4 && ok) { openControls(); SFX.select(); }
+  if (Game.menuIdx === 4 && (lr || ok)) { Game.frameData = !Game.frameData; SFX.select(); }
+  if (Game.menuIdx === 5 && ok) { openControls(); SFX.select(); }
   if (ok && Game.menuIdx < 2) { SFX.select(); setupMatch(Game.menuIdx === 0 ? 'cpu' : 'pvp'); Keys.hit.clear(); }
 }
 
 function pauseItems() {
-  return [{ label: 'RESUME' }, { label: 'SOUND', value: SFX.muted ? 'OFF' : 'ON', opt: true }, { label: 'CONTROLS' }, { label: 'QUIT TO TITLE' }];
+  return [
+    { label: 'RESUME' }, { label: 'SOUND', value: SFX.muted ? 'OFF' : 'ON', opt: true },
+    { label: 'FRAME DATA', value: Game.frameData ? 'ON' : 'OFF', opt: true }, { label: 'CONTROLS' }, { label: 'QUIT TO TITLE' },
+  ];
 }
 function pauseInput() {
   if (Game.showControls) { controlsInput(); return; }
   const n = pauseItems().length;
   if (menuUp()) { Game.menuIdx = (Game.menuIdx + n - 1) % n; SFX.select(); }
   if (menuDown()) { Game.menuIdx = (Game.menuIdx + 1) % n; SFX.select(); }
-  const ok = menuOk() || ((menuLeft() || menuRight()) && Game.menuIdx === 1);
+  const ok = menuOk() || ((menuLeft() || menuRight()) && (Game.menuIdx === 1 || Game.menuIdx === 2));
   if (menuBack()) { Game.paused = false; return; }
   if (!ok) return;
   SFX.select();
   if (Game.menuIdx === 0) Game.paused = false;
   else if (Game.menuIdx === 1) SFX.toggle();
-  else if (Game.menuIdx === 2) openControls();
+  else if (Game.menuIdx === 2) Game.frameData = !Game.frameData;
+  else if (Game.menuIdx === 3) openControls();
   else { Game.paused = false; setupDemo(); }
 }
 
@@ -309,24 +323,36 @@ function render() {
   drawPetals(t, 14, 1); // near petals drift in front of the fighters
 
   if (Game.invert > 0) {
-    ctx.globalCompositeOperation = 'difference';
-    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H);
-    ctx.globalCompositeOperation = 'source-over';
+    // negative flash (finishers): flips lightness but keeps each colour's hue. A plain invert would turn
+    // the lavender fighter yellow. Per channel: v + 255 - max - min.
+    const img = ctx.getImageData(0, 0, W, H), d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2], k = 255 - Math.max(r, g, b) - Math.min(r, g, b);
+      d[i] = r + k; d[i + 1] = g + k; d[i + 2] = b + k;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  if (Game.flash) {
+    const fl = Game.flash, k = fl.t / fl.life;
+    ctx.globalAlpha = fl.alpha * (1 - k) * (1 - k);
+    ctx.fillStyle = fl.col; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
   }
 
   if (Game.mode === 'title') { drawTitle(t); return; }
 
   if (Game.mode !== 'end') for (const f of fs) drawTag(f, Game.players === 'cpu' ? (f.id === 0 ? 'YOU' : 'CPU') : f.name);
   drawBar(fs[0], 1, fs[0].comboShow); drawBar(fs[1], -1, fs[1].comboShow);
+  if (Game.frameData) drawFrameMeter(fs);
   const secs = Math.max(0, Math.ceil(Game.timer / 60));
   otext(String(secs).padStart(2, '0'), W / 2, 9, 2, 'center', secs <= 10 && t % 30 < 15 ? PAL.red : '#ffffff', true);
   text('ROUND ' + Game.round, W / 2, 28, 1, 'center', PAL.mid);
 
   if (Game.mode === 'intro') {
     if (Game.phaseT < 55) bigText('ROUND ' + Game.round, 112, 3);
-    else bigText('FIGHT!', 106, Game.phaseT < 60 ? 5 : 4, PAL.yellow);
+    else bigText('FIGHT!', 106, Game.phaseT < 60 ? 5 : 4, PAL.accent);
   } else if (Game.mode === 'ko') {
-    bigText(Game.koText, 104, Game.phaseT < 8 ? 6 : 5, PAL.yellow);
+    bigText(Game.koText, 104, Game.phaseT < 8 ? 6 : 5, PAL.accent);
     if (Game.koSub && Game.phaseT > 6) otext(Game.koSub, W / 2, 148, 1, 'center', '#ffffff', true);
     if (Game.phaseT > 50) {
       const msg = Game.koWinner ? Game.koWinner.name + ' TAKES THE ROUND' : 'NO WINNER';
@@ -342,7 +368,7 @@ function render() {
   if (Game.paused) drawPause();
 }
 
-// button-style list. Selected row: white bar, dark text, yellow tab, slides out a few px.
+// button-style list. Selected row: white bar, dark text, cyan accent tab, slides out a few px.
 const BTN_H = 15, BTN_GAP = 3;
 let btnSel = -1, btnT = 0;
 function drawButtons(items, x, y, w, sel, slide = 4) {
@@ -352,7 +378,7 @@ function drawButtons(items, x, y, w, sel, slide = 4) {
     const on = i === sel, by = y + i * (BTN_H + BTN_GAP), bx = Math.round(x + (on ? slide * k : 0));
     if (on) {
       G.col('#ffffff'); G.rect(bx, by, w, BTN_H);
-      G.col(PAL.yellow); G.rect(bx - 4, by, 2, BTN_H);
+      G.col(PAL.accent); G.rect(bx - 4, by, 2, BTN_H);
     } else {
       ctx.globalAlpha = 0.6; G.col('#000000'); G.rect(bx, by, w, BTN_H); ctx.globalAlpha = 1;
       G.col(PAL.dim); G.rect(bx, by + BTN_H - 1, w, 1);
@@ -360,7 +386,7 @@ function drawButtons(items, x, y, w, sel, slide = 4) {
     text(it.label, bx + 8, by + 4, 1, 'left', on ? PAL.bg : PAL.light, true);
     if (it.value != null) {
       const v = it.opt && on ? '< ' + it.value + ' >' : it.value;
-      text(v, bx + w - 8, by + 4, 1, 'right', on ? PAL.bg : PAL.yellow, true);
+      text(v, bx + w - 8, by + 4, 1, 'right', on ? PAL.bg : PAL.accent, true);
     }
   });
 }
@@ -388,17 +414,17 @@ function leftShade(solid, fade, alpha) {
 
 function drawTitle(t) {
   if (Game.showControls) { drawControls(); return; }
-  leftShade(205, 110, 0.82);
+  leftShade(225, 110, 0.82);
   const x = 30;
   // stacked logo over a two-tone P1/P2 bar
   // extruded logo: black outline around the whole block, player-colour depth, white face
-  const LS = 4, DEPTH = 3;
-  for (const [word, wy, c] of [['STICK', 24, PBACK[0]], ['BRAWL', 61, PBACK[1]]]) {
+  const DEPTH = 3;
+  for (const [word, wy, c, LS] of [['CLASSIQUE', 28, PBACK[0], 3], ['BRAWL', 61, PBACK[1], 4]]) {
     for (let d = 0; d <= DEPTH; d += 2) for (const [ox, oy] of [[-3, -3], [0, -3], [3, -3], [-3, 0], [3, 0], [-3, 3], [0, 3], [3, 3]]) text(word, x + ox, wy + d + oy, LS, 'left', '#000000', true);
     for (let d = DEPTH; d >= 1; d--) text(word, x, wy + d, LS, 'left', c, true);
     text(word, x, wy, LS, 'left', '#ffffff', true);
   }
-  const lw = textWidth('BRAWL', LS, true);
+  const lw = textWidth('CLASSIQUE', 3, true);
   G.col(PCOL[0]); G.rect(x, 100, lw / 2 - 1, 2);
   G.col(PCOL[1]); G.rect(x + lw / 2 + 1, 100, lw / 2 - 1, 2);
   text('1V1 WEAPON BRAWLER', x, 107, 1, 'left', PAL.mid);
@@ -413,18 +439,20 @@ function drawTitle(t) {
 }
 
 const CONTROL_ROWS = [
-  ['LEFT', 'STICK / DPAD'], ['RIGHT', 'STICK / DPAD'], ['UP / AIM UP', 'STICK / DPAD'], ['DOWN', 'STICK / DPAD'],
-  ['JUMP', 'A'], ['LIGHT', 'X'], ['HEAVY', 'B'], ['DODGE / DASH', 'LB / RB'], ['PICK UP / THROW', 'Y'],
+  ['LEFT', 'STICK / DPAD'], ['RIGHT', 'STICK / DPAD'], ['UP / AIM UP', 'STICK / DPAD'], ['DOWN / BLOCK / PARRY', 'STICK / DPAD'],
+  ['JUMP', 'A'], ['LIGHT', 'X'], ['HEAVY', 'B'], ['DODGE / DASH / BURST', 'LB / RB'], ['PICK UP / THROW', 'Y'],
 ];
 const CONTROL_TIPS = [
-  'DODGE + SIDE OR DOUBLE-TAP = DASH    JUMP OUT OF A DASH = DASH JUMP',
-  'NEUTRAL AIR DODGE + LIGHT = GRAVITY CANCEL',
-  'AIR HEAVY = RECOVERY    DOWN + HEAVY = GROUND POUND',
-  '1P MODE: P1 CAN USE EITHER KEY SET',
+  'DODGE + ANY OF 8 DIRECTIONS = DODGE THAT WAY (DASH IF ON COOLDOWN)',
+  'TAP DOWN = PARRY (AUTO COUNTER-STRIKE)    HOLD DOWN = CROUCH BLOCK',
+  'GROUND POUNDS BREAK BLOCK    HITS FROM BEHIND AREN\'T BLOCKED',
+  'BAR FULL: DODGE WITH NO DIRECTION = BURST (WORKS MID-COMBO, ALSO IN AIR)',
+  'AIR HEAVY = RECOVERY    NEUTRAL AIR DODGE + LIGHT = GRAVITY CANCEL',
+  '1P: P1 USES EITHER KEY SET    2P: P1 KEYBOARD, P2 GAMEPAD',
 ];
 function drawControls() {
   ctx.globalAlpha = 0.75; G.col(PAL.bg); G.rect(0, 0, W, H); ctx.globalAlpha = 1;
-  const pw = 460, ph = 304, px = (W - pw) / 2, py = (H - ph) / 2;
+  const pw = 460, ph = 344, px = (W - pw) / 2, py = (H - ph) / 2;
   panel(px, py, pw, ph);
   G.col(PCOL[0]); G.rect(px, py, pw / 2, 3);
   G.col(PCOL[1]); G.rect(px + pw / 2, py, pw / 2, 3);
@@ -443,8 +471,8 @@ function drawControls() {
       const sel = j < CTRL_RESET && j === Game.ctrlRow && i === Game.ctrlCol + 1;
       if (sel) {
         const blink = Game.rebinding && Game.t % 40 < 20;
-        G.col(Game.rebinding ? (blink ? PAL.yellow : '#ffffff') : '#ffffff'); G.rect(cols[i] - 4, ry - 3, cellW[i], RH);
-        G.col(PAL.yellow); G.rect(cols[i] - 6, ry - 3, 2, RH);
+        G.col(Game.rebinding ? (blink ? PAL.accent : '#ffffff') : '#ffffff'); G.rect(cols[i] - 4, ry - 3, cellW[i], RH);
+        G.col(PAL.accent); G.rect(cols[i] - 6, ry - 3, 2, RH);
         text(Game.rebinding ? 'PRESS A KEY' : c, cols[i], ry + 1, 1, 'left', PAL.bg, true);
       } else {
         const dimmed = j === CTRL_RESET || i === 3;
@@ -455,7 +483,7 @@ function drawControls() {
   // reset button
   const by = ry0 + rows.length * RH + 2, onReset = Game.ctrlRow === CTRL_RESET;
   drawButtons([{ label: 'RESET TO DEFAULTS' }], px + 20, by, 140, onReset ? 0 : -1, 0);
-  if (Game.ctrlMsg && Game.t - Game.ctrlMsgT < 120) text(Game.ctrlMsg, px + 172, by + 4, 1, 'left', PAL.yellow, true);
+  if (Game.ctrlMsg && Game.t - Game.ctrlMsgT < 120) text(Game.ctrlMsg, px + 172, by + 4, 1, 'left', PAL.accent, true);
   G.col(PAL.dim); G.rect(px + 14, by + 22, pw - 28, 1);
   CONTROL_TIPS.forEach((l, i) => text(l, px + 20, by + 30 + i * 11, 1, 'left', PAL.mid));
   let hx = px + 20;
@@ -473,9 +501,9 @@ function drawControls() {
 function drawPause() {
   if (Game.showControls) { drawControls(); return; }
   ctx.globalAlpha = 0.7; G.col(PAL.bg); G.rect(0, 0, W, H); ctx.globalAlpha = 1;
-  const pw = 200, ph = 130, px = (W - pw) / 2, py = 100;
+  const pw = 200, ph = 150, px = (W - pw) / 2, py = 95;
   panel(px, py, pw, ph);
-  G.col(PAL.yellow); G.rect(px, py, pw, 3);
+  G.col(PAL.accent); G.rect(px, py, pw, 3);
   bigText('PAUSED', py + 16, 2);
   drawButtons(pauseItems(), px + 20, py + 40, pw - 40, Game.menuIdx, 0);
   keyHint('ESC', 'RESUME', px + 20, py + ph - 16);

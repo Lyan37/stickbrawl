@@ -1,9 +1,10 @@
 'use strict';
 // ---------- CPU opponent: produces the same held/pressed buttons a player would ----------
+// block = chance per frame to crouch-block a swing in range, parry = share of reactions that are parries (timed nlight)
 const AI_LEVELS = [
-  { name: 'EASY',   think: [16, 28], dodge: 0.01,  aggr: 0.05, cool: [22, 40] },
-  { name: 'NORMAL', think: [9, 18],  dodge: 0.025, aggr: 0.12, cool: [12, 26] },
-  { name: 'HARD',   think: [4, 10],  dodge: 0.05,  aggr: 0.25, cool: [5, 14] },
+  { name: 'EASY',   think: [16, 28], dodge: 0.01,  aggr: 0.05, cool: [22, 40], block: 0.02, parry: 0.1, burst: 0.01 },
+  { name: 'NORMAL', think: [9, 18],  dodge: 0.025, aggr: 0.12, cool: [12, 26], block: 0.05, parry: 0.25, burst: 0.03 },
+  { name: 'HARD',   think: [4, 10],  dodge: 0.05,  aggr: 0.25, cool: [5, 14],  block: 0.1,  parry: 0.4, burst: 0.06 },
 ];
 
 class AIController {
@@ -11,6 +12,7 @@ class AIController {
     this.lvl = AI_LEVELS[level];
     this.held = emptyButtons(); this.pressed = emptyButtons();
     this.hold = { jump: 0, light: 0, heavy: 0, dodge: 0, throw: 0 };
+    this.blockT = 0;
     this.me = null; this.op = null; this.world = null;
     this.t = 0; this.next = 0; this.cool = 30;
     this.moveDir = 0; this.wantDown = false; this.goalPickup = false;
@@ -27,10 +29,15 @@ class AIController {
     if (!this.me) return;
     this.t++;
     this.think(this.me, this.op);
-    let dx = this.moveDir, dy = this.wantDown ? 1 : 0;
+    // wantDown is for fast-falling; on the ground holding down would crouch-block
+    let dx = this.moveDir, dy = this.wantDown && !this.me.ground ? 1 : 0;
     if (this.fT > 0) { this.fT--; dx = this.fdx; dy = this.fdy; }
+    if (this.blockT > 0) { this.blockT--; dx = 0; dy = 1; }
     this.held.left = dx < 0; this.held.right = dx > 0;
     this.held.down = dy > 0; this.held.up = dy < 0;
+    // direction press edges (tap-down parry reads pressed.down, like a real controller)
+    this.prevDir = this.prevDir || {};
+    for (const d of ['left', 'right', 'up', 'down']) { this.pressed[d] = this.held[d] && !this.prevDir[d]; this.prevDir[d] = this.held[d]; }
     for (const b in this.hold) {
       this.held[b] = this.hold[b] > 0;
       if (this.hold[b] > 0) this.hold[b]--;
@@ -46,15 +53,25 @@ class AIController {
 
     // escape a combo when hitstun ends
     if (me.state === 'hitstun') {
+      // burst out of a combo (2+ hits) once the bar is full: neutral dodge
+      if (me.burst >= BURST.max && me.combo >= 2 && Math.random() < L.burst) { this.tap('dodge'); this.dir(0, 0, 2); return; }
       if (me.stun <= 2 && adx < 70 && Math.random() < L.dodge * 10) { this.tap('dodge'); this.dir(-fd, me.ground ? 0 : -1, 6); }
       return;
     }
 
     const canAct = me.free || (me.state === 'dash' && me.sf >= 3);
+    if (me.state === 'blockstun' || this.blockT > 0) return;   // keep guarding
 
-    // react to an incoming attack
-    if (canAct && op.state === 'attack' && op.part && op.rf < 0 && op.af < op.part.s && adx < op.wpn.range + 34 && Math.random() < L.dodge * 3) {
-      if (me.ground && Math.random() < 0.5) { this.tap('dodge'); this.dir(0, 0, 4); }
+    // react to an incoming attack: parry, crouch block, or dodge / hop away
+    const swinging = op.state === 'attack' && op.part && op.rf < 0 && op.af < op.part.s && adx < op.wpn.range + 34;
+    if (canAct && swinging && me.ground && me.parryCD === 0 && op.part.s - op.af <= 6 && Math.random() < L.dodge * 3 * L.parry * 2) {
+      this.moveDir = 0; this.dir(0, 1, 2); return;   // tap down = parry (released, so the parry swing follows)
+    }
+    if (canAct && swinging && me.ground && op.move.kind !== 'gp' && Math.random() < L.block) {
+      this.blockT = randi(14, 30); this.moveDir = 0; return;
+    }
+    if (canAct && swinging && Math.random() < L.dodge * 3) {
+      if (me.ground && Math.random() < 0.5) { this.tap('dodge'); this.dir(-fd, 0, 4); }   // roll away (no spot dodge)
       else if (me.ground) { this.tap('jump'); this.dir(-fd, 0, 6); }
       else { this.tap('dodge'); this.dir(-fd, -1, 4); }
       return;
@@ -66,6 +83,7 @@ class AIController {
         const rel = p.x - me.x;
         if (Math.abs(rel) < 70 && sign(p.vx) === -sign(rel) && Math.abs(p.y - (me.y - 20)) < 26 && Math.random() < L.dodge * 4) {
           if (me.ground && Math.random() < 0.6) this.tap('jump');
+          else if (me.ground) { this.blockT = randi(12, 20); this.moveDir = 0; }   // crouch-block it (no spot dodge)
           else { this.tap('dodge'); this.dir(0, 0, 3); }
           return;
         }

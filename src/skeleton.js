@@ -123,4 +123,7 @@ const POSE = {
   land:  { t: -70, l: [35, 115], k: [135, 75] },
   flip:  { t: -200, l: [-60, 0], k: [-30, 40] },
   reach: { t: -60, l: [30, 95], k: [140, 120] },
+  guard: { t: -66, l: [32, 112], k: [142, 78] },                        // crouch block
+  burst: { t: -96, a: [-55, -70], b: [-125, -110], l: [55, 100], k: [125, 100] },  // arms flung out (burst)
+  riposte: { t: -76, b: [165, 125], l: [28, 98], k: [148, 118] },        // after a parry (arm/weapon aimed in fighter.js)
 };

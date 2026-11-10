@@ -1,7 +1,7 @@
-# Stick Brawl
+# Classique Brawl
 
 Tiny browser 1v1 weapon brawler. It has an endless flat stage, HP-based rounds, and Brawlhalla-style weapon movesets.
-The look follows YOMI Hustle (a white ruler floor, flat pastel silhouettes, yellow hit sparks, steel-blue smears and sliced afterimages) over a pixel-art night stage: you fight on a misty lake under Mount Fuji, with a sakura shore, live water reflections and falling petals. Each fighter wears a cloth scarf (P1 red, P2 blue) that trails and flutters with their motion. Every match rolls a new sky (palette, stars, clouds, milky way), moon phase/position and set of sakura trees (`src/scenery.js`).
+The look follows YOMI Hustle (a white ruler floor, flat pastel silhouettes, warm orange hit sparks, steel-blue smears and sliced afterimages) over a pixel-art night stage: you fight on a misty lake under Mount Fuji, with a sakura shore, live water reflections and falling petals. Each fighter wears a cloth scarf (P1 red, P2 blue) that trails and flutters with their motion. Every match rolls a new sky (palette, stars, clouds, milky way), moon phase/position and set of sakura trees (`src/scenery.js`).
 It's plain JavaScript with no build step and no dependencies.
 
 Open `index.html` directly, or serve the folder with `python3 -m http.server`.
@@ -14,13 +14,15 @@ Open `index.html` directly, or serve the folder with `python3 -m http.server`.
 | Jump                            | Space          | Up          | A                  |
 | Light attack                    | J              | Z           | X                  |
 | Heavy (recovery / ground pound) | K              | X           | B                  |
-| Dodge / dash                    | L / Left Shift | Right Shift | Bumpers / triggers |
+| Parry (tap) / crouch block (hold) | S            | Down        | Stick / D-pad down |
+| Dodge / roll / dash             | L / Left Shift | Right Shift | Bumpers / triggers |
 | Pick up / throw weapon          | H              | C           | Y                  |
 | Pause                           | Esc / P        |             | Start              |
 
-In 1P mode, P1 can use either key set.
+In 1P mode, P1 can use either key set (and the first gamepad).
+In LOCAL 2P, P1 is on the keyboard and P2 is on the first connected gamepad by default. The P2 keys still work as a fallback, and a second gamepad goes to P1.
 
-Keys can be rebound under **CONTROLS** (title screen or pause menu): pick a P1/P2 cell, press Enter, then press the new key (Esc cancels). Bindings are saved to `localStorage` (`stickbrawl.keymaps.v1`) and apply immediately, even mid-match. A key bound to one player is removed from the other. Esc and P are reserved for pause. **RESET TO DEFAULTS** restores the table above. Gamepad buttons are fixed.
+Keys can be rebound under **CONTROLS** (title screen or pause menu): pick a P1/P2 cell, press Enter, then press the new key (Esc cancels). Bindings are saved to `localStorage` (`classiquebrawl.keymaps.v1`; older `stickbrawl.keymaps.v1` saves are still read) and apply immediately, even mid-match. A key bound to one player is removed from the other. Esc and P are reserved for pause. **RESET TO DEFAULTS** restores the table above. Gamepad buttons are fixed.
 
 ## Mechanics (modelled on the Brawlhalla wiki)
 
@@ -29,6 +31,7 @@ Keys can be rebound under **CONTROLS** (title screen or pause menu): pick a P1/P
   - Throw picks a weapon up, and throws it if you're already holding one. Thrown weapons bounce and stop hurting once they slow down.
   - Down + throw on the ground drops your weapon.
 - **Lights:** each weapon has neutral, side and down lights, on the ground and in the air.
+  - Diagonals count as vertical. Up-diagonal (or up) gives the neutral light. Down-diagonal gives the down light. Only pure left/right gives the side light, and the diagonal's left/right part still turns you. Unarmed ground heavies follow the same rule.
   - Many lights are strings that only continue if the first hit lands. Examples: sword nlight's 3rd slash, the bow's arrow after a melee hit.
   - You can't repeat the same light back-to-back.
 - **Greatsword chain:** opener → bridge (a different direction) → closer (the same direction, or after a bridge). Gravity cancel goes straight to a closer.
@@ -44,7 +47,7 @@ Keys can be rebound under **CONTROLS** (title screen or pause menu): pick a P1/P
 - **Axe:** a short double-bit hand axe. Slow, wide arcs and heavy hits. Down light hops forward and chops, popping the target up (main combo starter).
   - Side light is a stepping cleave; on hit an overhead slam follows. Neutral light is an anti-air scoop; neutral air arcs from behind to front.
   - Recovery whirls up with two dragging hits, then a launching cut.
-- **Combos:** recovery is 45% shorter when your move hits, so follow-ups connect.
+- **Combos:** recovery is 60% shorter when your move hits, so follow-ups connect.
   - Pressing a direction up to 3 frames after light still picks the directional move (it never downgrades to neutral).
   - A buffered attack uses the direction you held when you pressed it, so tapping side+light during recovery gives the side move.
   - Side lights and side airs reach further and stand taller. Non-finisher hits push the target less sideways, and fast lunges brake on hit.
@@ -61,12 +64,61 @@ Keys can be rebound under **CONTROLS** (title screen or pause menu): pick a P1/P
 - **Landing aerials:** an aerial that touches the ground keeps playing (Brawlhalla's grounded variant) and adds its landing lag to the recovery. It no longer vanishes, so late aerials hit grounded opponents. Air control during aerials is 80%.
 - **Recovery any time you're airborne:** no jump needed first. Jump + heavy together goes straight into recovery, and heavy cancels the recovery frames of an airborne attack (e.g. after a launcher hop) or an air dodge's end-lag.
 - **Air budget:** 2 air jumps + 1 recovery. Extra recoveries are weaker and each costs a jump. Getting hit while out of jumps gives you one back.
-- **Dodge:**
-  - Ground: spot dodge (16f invincibility, 60f cooldown).
-  - Air: neutral (20f) or directional (12f). Air dodge cooldown is 163f; landing 75f or more after the dodge clears it.
-  - Dash: dodge + side, or double-tap. Jumping out of a dash is a dash jump.
+- **Dodge** (constants in `DODGE`, `src/fighter.js`):
+  - **8-way:** dodge + any of the 8 directions. With dodge ready it's an invincible dodge that way; on cooldown it's a dash that way (no invincibility).
+  - Ground: there's no spot dodge. Neutral or straight down + dodge is the **burst** (below) when your bar is full, and does nothing otherwise. The press stays buffered, so a direction a moment later still rolls. Side or down-diagonal = roll along the floor (18f invincibility, 54f cooldown). Up or up-diagonal = directional dodge that lifts off (18f; ground cooldown, keeps your air dodge).
+  - Air: neutral (26f) or directional in any of 8 directions (18f). Air dodge cooldown is 150f; landing 70f or more after the dodge clears it.
+  - Leniency: a direction pressed up to 4f after dodge still turns a neutral dodge directional, or re-aims a dash. Dodge presses are buffered 12f.
+  - **Dash (8-way):** dodge + direction while dodge is on cooldown, or double-tap left/right. Gravity is off during the dash.
+    - Dashing up from the ground or dashing in the air uses your one air dash, which resets on landing or getting hit.
+    - A down-diagonal air dash that hits the floor keeps sliding. You can roll out of a ground dash. Jumping out of a dash is a dash jump.
   - Gravity cancel: neutral air dodge, then light.
-  - Chase dodge: landing a hit grants 2 dodges (grounded attack) or 1 (aerial). They're usable up to 12f after the attack ends, work in any direction (on the ground too), and can be cancelled into an attack.
+  - Chase dodge: landing a hit grants 2 dodges (grounded attack) or 1 (aerial). They're usable up to 18f after the attack ends, work in any direction (on the ground too, except neutral), and can be cancelled into an attack.
+- **Burst** (`BURST`, YOMI Hustle style): dodge with **no direction** while your burst bar is full.
+  - **Combo breaker:** works while you're in hitstun or blockstun, on the ground and in the air. A press during a hit freeze is buffered and bursts as soon as the freeze ends.
+  - In neutral it replaces the old spot dodge. In the air a neutral dodge is still your air dodge (and gravity cancel) while you have one; after that it bursts.
+  - Effect:
+    - 14f of invincibility.
+    - A shockwave hits the opponent within 60px: 2 chip damage (never lethal), a small knockback and 18f of stun.
+    - Your move or hitstun is cancelled, and your air jumps, recovery and air dodge are refreshed. The last 6f are recovery.
+    - Cyan screen flash.
+  - **Meter:** the thin bar under each HP bar. It starts each round at 50% and fills over time (empty to full in about 60 s). Taking damage adds 3× the damage, dealing it adds 1×. It flashes cyan with **BURST** when full, and a burst empties it.
+- **Crouch block** (`GUARD`): hold down on the ground. It blocks hits and projectiles from the front for 20% chip damage, plus pushback and blockstun (0.95× the move's stun, min 8f).
+  - Ground pounds are overheads and break it. Hits from behind aren't blocked.
+  - Chip that would KO lands as a real hit, so the finisher still plays.
+  - A blocked move can't continue its on-hit follow-ups and gets its full recovery.
+- **Parry** (`PARRY`): **tap down** on the ground. **Holding** down is the crouch block.
+  - Pressing down starts your weapon's **parry move** (`PARRY_SWING` in `src/weapons.js`). Its first 8f are a crouched deflect pose, and that is the parry window. A melee hit caught in it is cancelled, the attacker reels for 38f and the screen flashes white.
+  - **Hold:** if down is still held when the window closes, it becomes a crouch block with no swing.
+  - **Tap that catches nothing:** no swing, just recovery, so a mistimed tap is punishable.
+  - **Parry attack, on success only:** the weapon's parry attack fires automatically at the staggered attacker (2.5–4 damage). Then you go into the riposte pose for follow-ups.
+    - It lunges in if they're out of reach, so it always connects.
+    - Its startup is 6f after the parry freeze. There's no counter-parry: once you're parried, the strike lands.
+  - Each weapon has its own deflect pose and parry attack:
+
+    | Weapon | Deflect | Parry attack |
+    | --- | --- | --- |
+    | Fists | forearms up | palm strike |
+    | Sword | blade upright | flick cut |
+    | Staff | staff upright | butt thrust |
+    | Greatsword | planted point-down | rising cut |
+    | Bow | limb raised | bow bash |
+    | Scythe | haft upright | hook sweep |
+    | Rocket lance | shaft angled up | jab |
+    | Gauntlets | forearms crossed | double punch |
+    | Axe | haft up | chop |
+  - Down + light / heavy / throw / dodge within 3f of the tap still gives the down move (down light, weapon drop, …) and refunds the parry.
+  - One parry per ~1 s (60f cooldown), tapped or held. Down pressed in the air is a fast-fall, never a parry, so landing with down held just blocks.
+  - On a parry you get 10f of invincibility and the parry cooldown resets. Projectiles get no parry attack: you go straight to the riposte pose.
+  - **Riposte:** after the parry attack (or a projectile parry) you snap into a lunge with your weapon (or fist) aimed at the enemy's chest. A glint runs to the tip, and the aim tracks them for 24f. Any input cancels it, so the free punish isn't delayed.
+  - Parried arrows/projectiles fly back and now belong to you; thrown weapons drop.
+  - Ground only: there's no air parry, since down in the air is fast-fall.
+- **Recovery frames** (`RECOVERY`): every committal action ends in recovery frames. That covers attack end-lag, dodge frames after the invincibility runs out, a whiffed parry and landing lag.
+  - Recovery is 60% shorter when the move hits, base length when it's blocked, and 25% longer when it whiffs.
+  - Hitstun is move stun × 1.32 (`HITSTUN_MUL`), so getting hit recovers fairly fast. Shorter on-hit recovery keeps every combo link at the same frame advantage.
+  - Hitting someone during their recovery is a **punish**: +20% damage and +30% hitstun, and the screen flashes red.
+  - **FRAME DATA** (title or pause menu) shows a frame meter: the last 60 frames per fighter coloured by phase, plus startup/active/recovery counts of the current or last action.
+- **Weapon pickup:** grab reach leans into your movement, and an unarmed throw press stays buffered 16f. Pressing pick up slightly early while running or dashing still grabs the weapon, and dashing keeps its momentum through the grab.
 - **Rounds:** first to 2. The timer is 99 s, and higher HP wins on time-out.
 
 ## Files

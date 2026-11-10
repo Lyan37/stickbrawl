@@ -57,6 +57,9 @@ const SFX = (() => {
       tone(Math.max(60, 170 - dmg * 6), 0.1 + dmg * 0.006, 'square', 0.35, -70);
       noise(0.08 + dmg * 0.006, 0.5, 500 + dmg * 20, 0.7);
     },
+    block(dmg) { tone(520 - dmg * 8, 0.05, 'triangle', 0.28, -120); noise(0.05, 0.3, 3200, 2.5); },
+    parry()  { tone(1320, 0.05, 'square', 0.22); tone(1760, 0.16, 'triangle', 0.3, -400, 0.04); noise(0.07, 0.35, 4200, 3); },
+    burst()  { tone(180, 0.25, 'sawtooth', 0.3, 520); noise(0.25, 0.45, 900, 0.6); tone(880, 0.12, 'square', 0.15, -300, 0.05); },
     land()   { noise(0.05, 0.15, 400, 1); },
     thud()   { tone(70, 0.18, 'square', 0.35, -30); noise(0.15, 0.4, 300, 0.8); },
     pickup() { tone(660, 0.05, 'square', 0.2); tone(990, 0.07, 'square', 0.2, 0, 0.05); },

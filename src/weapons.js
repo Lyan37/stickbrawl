@@ -183,7 +183,7 @@ const WEAPONS = {
 
   // ---------------------------------------------------------------- bow (arrows + melee)
   // Matched to brawlhalla.wiki.gg/wiki/Bow: dmg = wiki × 0.5, startup/active/gaps = wiki frames,
-  // stun ≈ wiki × 0.85 (engine applies ×1.45), r ≈ wiki miss recovery × 0.8, force ≈ (fixed + 0.6·var) / 10.
+  // stun ≈ wiki × 0.85 (engine applies ×HITSTUN_MUL, fighter.js), r ≈ wiki miss recovery × 0.8, force ≈ (fixed + 0.6·var) / 10.
   bow: {
     name: 'BOW', len: 0, range: 90, ranged: true,
     stance: { a: [15, 0], b: [150, 20], w: 0 },
@@ -420,6 +420,32 @@ function measureReach(wpn, m) {
     p.ext = ext > 3 ? ext : 0;
     if (p.ext) m.trail = m.trail || 1;
   }
+}
+
+// ---------------------------------------------------------------- parry moves (tap down on the ground)
+// moves.parry: the crouched deflect pose. Its startup (PARRY_WIN frames) IS the parry window (fighter.js
+// parrying()). Hold down through it and it turns into a crouch block; a tap that catches nothing just goes
+// into recovery (r), so a mistimed tap is punishable. No swing on a whiff.
+// moves.parryAtk: the weapon's parry attack, fired automatically only when a parry SUCCEEDS (world.js parry()):
+// it swings out of the deflect pose at the staggered attacker, then the riposte pose follows.
+const PARRY_WIN = 8, PARRY_ATK_S = 6;   // parryAtk startup after the parry freeze
+const DEFLECT_LEGS = { t: -70, l: [30, 110], k: [140, 80] };
+const PARRY_SWING = {
+  //            deflect pose (window)                    swing contact pose                      hitbox [x, y, w, h]  dmg  kb          stun r
+  none:       [{ a: [40, -80], b: [60, -70] },            { t: -74, a: [-5, -5], b: [140, 60] },      [2, -33, 18, 12],    2.5, [-20, 4],   16, 14],   // forearms up, palm strike
+  sword:      [{ a: [60, -60], w: -95 },                  { t: -66, a: [-10, 10], w: 20 },            [4, -38, 26, 24],    3,   [-25, 4.5], 16, 15],   // blade upright, flick cut
+  staff:      [{ a: [45, -55], b: [70, -40], w: -82 },    { t: -68, a: [-5, -5], b: [10, 0], w: -5 }, [4, -34, 40, 12],    3,   [-15, 4.5], 16, 16],   // staff upright, butt thrust
+  greatsword: [{ a: [70, 40], b: [80, 50], w: 95 },       { t: -84, a: [-40, -60], w: -70 },          [0, -50, 30, 46],    4,   [-70, 5],   18, 20],   // planted point-down, rising cut
+  bow:        [{ a: [30, -60], w: -80 },                  { t: -66, a: [-5, -5], w: -80 },            [4, -38, 20, 22],    2.5, [-25, 4],   16, 15],   // limb raised, bow bash
+  scythe:     [{ a: [50, -70], w: -100 },                 { t: -68, a: [10, 30], w: 40 },             [-2, -30, 34, 24],   3.5, [-30, 4.5], 17, 17],   // haft upright, hook sweep
+  lance:      [{ a: [40, -30], w: -45 },                  { t: -66, a: [-5, -5], w: 0 },              [4, -34, 40, 12],    3.5, [-15, 5],   16, 18],   // shaft angled up, jab
+  gauntlets:  [{ a: [30, -100], b: [40, -95] },           { t: -70, a: [-5, -5], b: [-10, -10] },     [2, -34, 20, 14],    3,   [-20, 4.5], 17, 13],   // forearms crossed, double punch
+  axe:        [{ a: [50, -80], w: -110 },                 { t: -64, a: [-20, 30], w: 40 },            [4, -40, 24, 30],    4,   [-40, 5],   18, 18],   // haft up, chop
+};
+for (const [key, [pS, pA, hb, dmg, kb, stun, r]] of Object.entries(PARRY_SWING)) {
+  const deflect = { ...DEFLECT_LEGS, ...pS };
+  WEAPONS[key].moves.parry = MV({ kind: 'parry', r }, { s: PARRY_WIN, a: 1, pS: deflect, pA: deflect });
+  WEAPONS[key].moves.parryAtk = MV({ kind: 'parryAtk', r, trail: 1 }, { s: PARRY_ATK_S, a: 3, hb, dmg, kb, stun, pS: deflect, pA });
 }
 
 // bake partial poses into full arrays; each part inherits from the previous part's contact pose
