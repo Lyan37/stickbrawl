@@ -40,6 +40,8 @@ const RECOVERY = { whiff: 1.25, punishDmg: 1.2, punishStun: 1.3 };
 const BURST = { max: 100, start: 50, regen: 100 / 3600, onHurt: 3, onHit: 1, t: 20, inv: 14, hover: 12, radius: 60, chip: 2, push: 3.5, pushUp: -2, stun: 18, stop: 8 };
 const BUF = 8;                       // input buffer
 const PICKUP_BUF = 16;               // unarmed throw press stays live this long, so running onto a weapon still grabs it
+const DASH_TRAIL_LINGER = 10;        // frames after a dash ends where pickup still sweeps the whole dash path
+const COMBO_HEAL_WINDOW = 120;       // frames after a combo ends where a burst still restores the HP it took
 const HURT_W = 14, HURT_H = 36;
 const FRAME_HIST = 60;              // frames kept for the frame meter
 const REPEAT_BLOCK = 10;             // same light attack can't be repeated back-to-back (whiff spam)
@@ -84,6 +86,7 @@ class Fighter {
       inv: 0, stun: 0, hitstop: 0, flash: 0, combo: 0, comboShow: null,
       dashDir: 0, dashUX: 0, dashUY: 0, dashLen: false, fastfall: false, gravScale: 1, squash: 0, landT: 0,
       dodgeKind: null, dodgeT: 0, chaseDodge: false, runPhase: 0, prevDx: 0, kill: null, wpnAway: false, bowShot: -99, scarf: null,
+      dashTrail: null, wpnFly: null, comboDmg: 0, comboEndT: 0,
     });
     // down = a fresh press of down on the ground (tap-down parry)
     this.buf = { jump: 0, light: 0, heavy: 0, dodge: 0, throw: 0, down: 0 };
@@ -185,6 +188,18 @@ class Fighter {
     if (this.comboShow && --this.comboShow.t <= 0) this.comboShow = null;
     this.sf++;
     this.gravScale = 1;
+    // dash path for swept pickups: grows while dashing, lingers a few frames after
+    if (this.dashTrail) {
+      const tr = this.dashTrail;
+      if (this.state === 'dash') { tr.x1 = this.x; tr.y1 = this.y; tr.t = DASH_TRAIL_LINGER; }
+      else if (--tr.t <= 0) this.dashTrail = null;
+    }
+    // weapon grabbed from afar flying into the hand
+    if (this.wpnFly && (++this.wpnFly.t >= this.wpnFly.life || this.weapon !== this.wpnFly.type)) {
+      if (this.weapon === this.wpnFly.type && this.sk) world.ring(this.sk.handA[0], this.sk.handA[1], 8);
+      this.wpnFly = null;
+    }
+    if (this.combo === 0 && this.comboEndT > 0 && --this.comboEndT === 0) this.comboDmg = 0;
 
     switch (this.state) {
       case 'idle':
@@ -249,7 +264,7 @@ class Fighter {
         this.stun--;
         if (this.ground) this.vx = approach(this.vx, 0, 0.45);
         else this.vx *= 0.955;
-        if (this.stun <= 0) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; this.combo = 0; }
+        if (this.stun <= 0) { this.state = this.ground ? 'idle' : 'air'; this.sf = 0; this.combo = 0; this.comboEndT = COMBO_HEAL_WINDOW; }
         break;
       case 'burst':
         this.gravScale = this.sf < BURST.hover ? 0 : 1;
@@ -338,6 +353,7 @@ class Fighter {
   // per airtime (reset on landing or getting hit). lenient = came from the dodge button, may re-aim.
   startDash(ux, uy, world, lenient) {
     this.state = 'dash'; this.sf = 0; this.dashLen = !!lenient; this.fastfall = false;
+    this.dashTrail = { x0: this.x, y0: this.y, x1: this.x, y1: this.y, t: DASH_TRAIL_LINGER };
     if (this.ground) world.dust(this.x, 0, 4, -(sign(ux) || this.facing));
     else world.ring(this.x, this.y - 18, 10);
     this.aimDash(ux, uy);
@@ -411,6 +427,15 @@ class Fighter {
     return true;
   }
   startBurst(world) {
+    // burst refunds the HP lost to the combo you're in (or one that just ended)
+    if ((this.combo > 0 || this.comboEndT > 0) && this.comboDmg > 0) {
+      const heal = Math.min(this.maxHp - this.hp, this.comboDmg);
+      if (heal > 0) {
+        this.hp += heal;
+        world.fx.push({ k: 'label', x: this.x, y: this.y - 62, t: 0, life: 45, s: '+' + Math.round(heal) + ' HP', col: PAL.accent });
+      }
+    }
+    this.comboDmg = 0; this.comboEndT = 0;
     Object.assign(this, {
       burst: 0, state: 'burst', sf: 0, inv: BURST.inv, move: null, part: null, rf: -1, af: -1, gc: false, stun: 0,
       fastfall: false, combo: 0, cInst: null, cIds: null,

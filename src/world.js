@@ -75,7 +75,7 @@ class World {
       Object.assign(o, {
         state: 'hitstun', sf: 0, move: null, part: null, rf: -1, gc: false, fastfall: false, chain: null,
         stun: BURST.stun, hitstop: BURST.stop, flash: BURST.stop + 2, vx: dir * BURST.push, vy: BURST.pushUp, facing: -dir,
-        cInst: null, cIds: null, combo: 0,
+        cInst: null, cIds: null, combo: 0, comboDmg: 0, comboEndT: 0,
       });
       o.ground = false; o.trail.length = 0; o.comboShow = null;
     }
@@ -171,6 +171,7 @@ class World {
     if (vic.jumps === 0) vic.jumps = 1;   // hit while out of jumps: get one back
     vic.trail.length = 0;
     vic.combo = wasStun ? vic.combo + 1 : 1;
+    vic.comboDmg = wasStun ? vic.comboDmg + dmg : dmg; vic.comboEndT = 0;   // refunded if they burst out
     // burst meter: taking damage fills it faster than dealing it
     vic.burst = Math.min(BURST.max, vic.burst + dmg * BURST.onHurt);
     att.burst = Math.min(BURST.max, att.burst + dmg * BURST.onHit);
@@ -333,14 +334,26 @@ class World {
   tryPickup(f) {
     const lead = clamp(f.vx * 3, -24, 24);
     const lo = f.x - 20 + Math.min(0, lead), hi = f.x + 20 + Math.max(0, lead);
+    // dash path (start -> now, lingering briefly after the dash): anything swept over counts, plus a small margin
+    const tr = f.dashTrail, M = 6;
+    const onTrail = (p) => {
+      if (!tr) return false;
+      const sx = tr.x1 - tr.x0, sy = tr.y1 - tr.y0, L2 = sx * sx + sy * sy;
+      const k = L2 ? clamp(((p.x - tr.x0) * sx + (p.y - tr.y0) * sy) / L2, 0, 1) : 0;
+      const cx = tr.x0 + sx * k, cy = tr.y0 + sy * k, dy = p.y - cy;
+      return Math.abs(p.x - cx) < 20 + M && dy > -52 - M && dy < 18 + M;
+    };
     let best = -1, bd = 1e9;
     for (let i = 0; i < this.pickups.length; i++) {
       const p = this.pickups[i], dy = p.y - f.y, d = Math.abs(p.x - f.x);
-      if (p.x > lo && p.x < hi && dy > -52 && dy < 18 && d < bd) { best = i; bd = d; }
+      if (((p.x > lo && p.x < hi && dy > -52 && dy < 18) || onTrail(p)) && d < bd) { best = i; bd = d; }
     }
     if (best < 0) return false;
     const p = this.pickups[best];
     f.weapon = p.type;
+    // grabbed from far back along the dash: the weapon flies to the hand
+    const far = Math.hypot(p.x - f.x, p.y - 9 - (f.y - 18));
+    f.wpnFly = far > 30 ? { type: p.type, x: p.x, y: p.y - 9, t: 0, life: clamp(Math.round(far / 9), 6, 14) } : null;
     this.pickups.splice(best, 1);
     this.ring(p.x, p.y - 6, 16);
     this.fx.push({ k: 'label', x: f.x, y: f.y - 54, t: 0, life: 40, s: WEAPONS[p.type].name });

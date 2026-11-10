@@ -275,13 +275,25 @@ function paintFighter(f, front, back, jx, jy, white) {
   if (sc) drawScarfTails(f.scarf.map((tl) => tl.p), z, sc[0], sc[1], jx, jy);
   // tucked weapons (wflip → 1) roll their blade to the far side and sit behind the body
   const wf = f.wflip || 0, tucked = wf > 0.5, wfs = f.facing * (1 - 2 * wf);
-  const paintWpn = (X, Y) => { if (f.weapon && f.weapon !== 'gauntlets' && !f.wpnAway) drawWeapon(f.weapon, X(sk.handA), Y(sk.handA), sk.wdir, z, wfs, bow); };
+  const fly = f.wpnFly && f.wpnFly.type === f.weapon ? f.wpnFly : null;
+  const paintWpn = (X, Y) => {
+    if (fly) {   // grabbed from afar: spins along an arc from where it lay into the hand
+      const k = easeOut(Math.min(1, (fly.t + 1) / fly.life)), h = sk.handA;
+      const wx = fly.x + (h[0] - fly.x) * k, wy = fly.y + (h[1] - fly.y) * k - Math.sin(k * Math.PI) * 10;
+      const a = (1 - k) * 4 * Math.PI * f.facing + Math.atan2(sk.wdir[1], sk.wdir[0]);
+      const px = Cam.sx(fly.x + (h[0] - fly.x) * Math.max(0, k - 0.25)), py = Cam.sy(fly.y + (h[1] - fly.y) * Math.max(0, k - 0.25));
+      G.col(PAL.accent); G.line(px, py, X([wx, wy]), Y([wx, wy]), 1);
+      drawWeapon(f.weapon, X([wx, wy]), Y([wx, wy]), [Math.cos(a), Math.sin(a)], z, wfs);
+      return;
+    }
+    if (f.weapon && f.weapon !== 'gauntlets' && !f.wpnAway) drawWeapon(f.weapon, X(sk.handA), Y(sk.handA), sk.wdir, z, wfs, bow);
+  };
   if (tucked) paintWpn((p) => Cam.sx(p[0]) + jx, (p) => Cam.sy(p[1]) + jy);
   const s = drawBody(sk, z, front, back, jx, jy);
   if (sc) drawScarfCollar(sk, z, sc[0], s, f.scarf[0].p[0], f.facing);
   if (!tucked) paintWpn(s.X, s.Y);
   drawFrontArm(sk, z, front, s);
-  if (f.weapon === 'gauntlets') {
+  if (f.weapon === 'gauntlets' && !fly) {
     G.col(white ? '#ffffff' : PAL.steel);
     G.disc(s.X(sk.handB), s.Y(sk.handB), 3.6 * z);
     G.disc(s.X(sk.handA), s.Y(sk.handA), 3.8 * z);
@@ -488,7 +500,7 @@ function drawFx(world, t) {
         if (e.t < 2) star(x, y, 5, 5 * z, 2 * z, 0, 3); else G.ring(x, y, 4 * z, 1);
         break;
       case 'label':
-        otext(e.s, x, y - e.t * 0.3, 1, 'center', '#ffffff');
+        otext(e.s, x, y - e.t * 0.3, 1, 'center', e.col || '#ffffff');
         break;
       case 'guard': {   // blocked hit: a bright bracket that flares and fades
         G.col(e.t < 3 ? '#ffffff' : PAL.cyan);
@@ -528,8 +540,9 @@ function drawBar(f, side, combo) {
   G.col(PAL.hpWell); G.rect(x0 - 1, y - 1, bw + 2, bh + 2);
   const wd = Math.round((bw * f.dispHp) / f.maxHp), wh = Math.round((bw * f.hp) / f.maxHp);
   const fill = (w) => (side === 1 ? G.rect(x0, y, w, bh) : G.rect(x0 + bw - w, y, w, bh));
-  G.col(PAL.crimson); fill(wd);
-  G.col(f.hp < 25 && Math.floor(Date.now() / 180) % 2 ? PAL.red : PAL.hp); fill(wh);
+  const hpCol = f.hp < 25 && Math.floor(Date.now() / 180) % 2 ? PAL.red : PAL.hp;
+  if (f.hp > f.dispHp) { G.col(PAL.accent); fill(wh); G.col(hpCol); fill(wd); }   // burst refund: cyan segment fills in
+  else { G.col(PAL.crimson); fill(wd); G.col(hpCol); fill(wh); }
   // weapon + round wins
   // burst meter: thin bar under the HP bar on the outer side; flashes BURST when full
   const mw = 110, mh = 3, my = y + bh + 4, mx = side === 1 ? x0 : x0 + bw - mw, full = f.burst >= BURST.max;

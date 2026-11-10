@@ -1,4 +1,4 @@
-# Classique Brawl
+# Clazzique Brawl
 
 Tiny browser 1v1 weapon brawler. It has an endless flat stage, HP-based rounds, and Brawlhalla-style weapon movesets.
 The look follows YOMI Hustle (a white ruler floor, flat pastel silhouettes, warm orange hit sparks, steel-blue smears and sliced afterimages) over a pixel-art night stage: you fight on a misty lake under Mount Fuji, with a sakura shore, live water reflections and falling petals. Each fighter wears a cloth scarf (P1 red, P2 blue) that trails and flutters with their motion. Every match rolls a new sky (palette, stars, clouds, milky way), moon phase/position and set of sakura trees (`src/scenery.js`).
@@ -19,10 +19,16 @@ Open `index.html` directly, or serve the folder with `python3 -m http.server`.
 | Pick up / throw weapon          | H              | C           | Y                  |
 | Pause                           | Esc / P        |             | Start              |
 
-In 1P mode, P1 can use either key set (and the first gamepad).
-In LOCAL 2P, P1 is on the keyboard and P2 is on the first connected gamepad by default. The P2 keys still work as a fallback, and a second gamepad goes to P1.
+Each player has a **device**, KEYBOARD or GAMEPAD. By default P1 is on the keyboard and P2 is on a gamepad. If both players use gamepads, P1 takes the first connected pad and P2 the second. A gamepad player with no pad plugged in falls back to their keys.
+In VS CPU, P1 is controlled by the keyboard (either key set) and every connected gamepad at once.
 
-Keys can be rebound under **CONTROLS** (title screen or pause menu): pick a P1/P2 cell, press Enter, then press the new key (Esc cancels). Bindings are saved to `localStorage` (`classiquebrawl.keymaps.v1`; older `stickbrawl.keymaps.v1` saves are still read) and apply immediately, even mid-match. A key bound to one player is removed from the other. Esc and P are reserved for pause. **RESET TO DEFAULTS** restores the table above. Gamepad buttons are fixed.
+**CONTROLS** (title screen or pause menu) has one column per player, showing the bindings for that player's device:
+- **DEVICE** row: press Enter to switch between KEYBOARD and GAMEPAD.
+- **Action rows**: press Enter, then press the new key or gamepad button (Esc cancels; Start also cancels on a gamepad). On a gamepad, movement is always the stick and D-pad.
+- **SWAP P1 / P2** swaps everything between the players: device, keys and gamepad buttons.
+- **RESET TO DEFAULTS** restores the table above.
+
+A key bound to one player is removed from the other. Esc, P and Start are reserved for pause. Settings are saved to `localStorage` (`classiquebrawl.keymaps.v1`, `classiquebrawl.devices.v1`, `classiquebrawl.padmaps.v1`; older `stickbrawl.keymaps.v1` saves are still read) and apply immediately, even mid-match.
 
 ## Mechanics (modelled on the Brawlhalla wiki)
 

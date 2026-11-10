@@ -75,12 +75,11 @@ function setupMatch(players) {
   const [a, b] = Game.fighters;
   a.wins = b.wins = 0;
   if (players === 'pvp') {
-    // default split: P1 on the keyboard, P2 on the first gamepad (P2 keys still work as a fallback,
-    // and a second gamepad goes to P1)
-    Game.ctrls = [new Controller([KEYMAPS.p1], 1), new Controller([KEYMAPS.p2], 0)];
+    // each player uses the device picked on the controls screen (default P1 keyboard, P2 gamepad)
+    Game.ctrls = [new Controller(() => playerSources('p1')), new Controller(() => playerSources('p2'))];
     a.name = 'P1'; b.name = 'P2';
   } else if (players === 'cpu') {
-    Game.ctrls = [new Controller([KEYMAPS.p1, KEYMAPS.p2], 0), new AIController(Game.cpuLevel)];
+    Game.ctrls = [new Controller(soloSources), new AIController(Game.cpuLevel)];
     a.name = 'P1'; b.name = 'CPU ' + AI_LEVELS[Game.cpuLevel].name;
   } else {
     Game.ctrls = [new AIController(1), new AIController(1)];
@@ -234,6 +233,7 @@ function titleItems() {
 }
 function openControls() {
   Game.showControls = true; Game.ctrlRow = 0; Game.ctrlCol = 0; Game.rebinding = false; Game.ctrlMsg = '';
+  Keys.hit.clear();
 }
 function titleInput() {
   if (Game.showControls) { controlsInput(); return; }
@@ -271,33 +271,68 @@ function pauseInput() {
   else { Game.paused = false; setupDemo(); }
 }
 
-// ---------------- controls screen (rebindable keys, saved to localStorage) ----------------
+// ---------------- controls screen (device + rebindable keys / gamepad buttons, saved to localStorage) ----------------
+// rows: 0 = device, 1..BTN.length = actions, last = SWAP / RESET buttons. Columns: P1, P2.
 const CTRL_PLAYERS = ['p1', 'p2'];
-const CTRL_RESET = BTN.length; // last row = reset to defaults
+const CTRL_DEVICE = 0, CTRL_BTNS = BTN.length + 1;
+// gamepad buttons held when a pad rebind starts, so the press that opened it isn't taken as the new button
+let padSnap = new Set();
+function padsDown() {
+  const out = new Set();
+  for (const gp of connectedPads()) gp.buttons.forEach((b, i) => { if (b && b.pressed) out.add(gp.index + ':' + i); });
+  return out;
+}
+function ctrlMsg(m) { Game.ctrlMsg = m; Game.ctrlMsgT = Game.t; }
 function controlsInput() {
+  const player = CTRL_PLAYERS[Game.ctrlCol];
   if (Game.rebinding) {
+    const action = BTN[Game.ctrlRow - 1];
+    if (DEVICES[player] === 'pad') {
+      if (Keys.hit.has('Escape')) { Game.rebinding = false; SFX.select(); return; }
+      const down = padsDown();
+      for (const k of down) {
+        if (padSnap.has(k)) continue;
+        const btn = +k.split(':')[1];
+        if (btn === 9) { Game.rebinding = false; SFX.select(); break; }
+        bindPad(player, action, btn);
+        Game.rebinding = false; ctrlMsg('SAVED'); SFX.select();
+        break;
+      }
+      padSnap = down;
+      // swallow the menu edge for the button just bound so it doesn't also confirm / back out
+      if (!Game.rebinding) padHit(0, 1, 9);
+      return;
+    }
     if (padHit(9, 1)) { Game.rebinding = false; SFX.select(); return; }
     for (const code of Keys.hit) {
       if (code === 'Escape') { Game.rebinding = false; SFX.select(); return; }
-      if (RESERVED_KEYS.has(code)) { Game.ctrlMsg = keyName(code) + ' IS RESERVED'; Game.ctrlMsgT = Game.t; return; }
-      bindKey(CTRL_PLAYERS[Game.ctrlCol], BTN[Game.ctrlRow], code);
-      Game.rebinding = false; Game.ctrlMsg = 'SAVED'; Game.ctrlMsgT = Game.t;
+      if (RESERVED_KEYS.has(code)) { ctrlMsg(keyName(code) + ' IS RESERVED'); return; }
+      bindKey(player, action, code);
+      Game.rebinding = false; ctrlMsg('SAVED');
       SFX.select();
       return;
     }
     return;
   }
   if (menuBack() || padHit(1)) { Game.showControls = false; SFX.select(); return; }
-  const n = CTRL_RESET + 1;
+  const n = CTRL_BTNS + 1;
   if (menuUp()) { Game.ctrlRow = (Game.ctrlRow + n - 1) % n; SFX.select(); }
   if (menuDown()) { Game.ctrlRow = (Game.ctrlRow + 1) % n; SFX.select(); }
-  if ((menuLeft() || menuRight()) && Game.ctrlRow < CTRL_RESET) { Game.ctrlCol = 1 - Game.ctrlCol; SFX.select(); }
+  if (menuLeft() || menuRight()) { Game.ctrlCol = 1 - Game.ctrlCol; SFX.select(); }
   if (!menuOk()) return;
   SFX.select();
-  if (Game.ctrlRow === CTRL_RESET) {
-    resetKeymaps(); saveKeymaps();
-    Game.ctrlMsg = 'DEFAULTS RESTORED'; Game.ctrlMsgT = Game.t;
-  } else { Game.rebinding = true; Game.ctrlMsg = ''; }
+  if (Game.ctrlRow === CTRL_BTNS) {
+    if (Game.ctrlCol === 0) { swapPlayers(); ctrlMsg('P1 / P2 SWAPPED'); }
+    else { resetKeymaps(); saveKeymaps(); resetDevices(); resetPadmaps(); saveDevices(); ctrlMsg('DEFAULTS RESTORED'); }
+  } else if (Game.ctrlRow === CTRL_DEVICE) {
+    toggleDevice(player);
+    ctrlMsg(player.toUpperCase() + ': ' + (DEVICES[player] === 'pad' ? 'GAMEPAD' : 'KEYBOARD'));
+  } else if (DEVICES[player] === 'pad' && PAD_DIRS.has(BTN[Game.ctrlRow - 1])) {
+    ctrlMsg('GAMEPAD MOVES WITH STICK / DPAD');
+  } else {
+    Game.rebinding = true; Game.ctrlMsg = '';
+    padSnap = padsDown();
+  }
 }
 
 function endInput() {
@@ -412,22 +447,104 @@ function leftShade(solid, fade, alpha) {
   ctx.globalAlpha = 1;
 }
 
+// ---------- title logo (samurai look: sumi ink, washi ivory, shu vermilion) ----------
+// built once into an offscreen canvas: fat CLAZZIQUE with a red slash cut through it, a small BRAWL
+// brush stroke leaning out under its bottom right, and a tiny 無 seal as a ™.
+const LOGO = { ink: '#0b0c0f', washi: '#f2ead8', washiD: '#b9ad97', shu: '#d7262e', shuD: '#6e0c14' };
+const LOGO_X = 4; // canvas x where the word starts
+// 無 (mu, "nothing") for the seal, 11x10 at 1px
+const SEAL_GLYPH = [
+  '.#.........', '.#########.', '#.#.#.#.#..', '###########', '..#.#.#.#..',
+  '..#.#.#.#..', '###########', '...........', '.#..#..#.#.', '#....#..#.#',
+];
+let logoCanvas = null;
+function buildLogo() {
+  const LW = 230, LH = 60;
+  const mk = (w = LW, h = LH) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+  const keep = G.ctx;
+  const S = 3, wx = LOGO_X, wy = 17, DEPTH = 2;
+  const lw = textWidth('CLAZZIQUE', S, true);
+  const cutAt = (c) => Math.round(wy + 16 - (c - wx) * 0.05); // rising slash
+
+  // 1. CLAZZIQUE: thick ink outline, deep red extrusion, ivory face, darker bottom row
+  const word = mk();
+  G.ctx = word.getContext('2d');
+  const ring = [[-2, -2], [0, -2], [2, -2], [-2, 0], [2, 0], [-2, 2], [0, 2], [2, 2]];
+  for (let d = 0; d <= DEPTH; d += DEPTH) for (const [ox, oy] of ring) text('CLAZZIQUE', wx + ox, wy + d + oy, S, 'left', LOGO.ink, true);
+  for (let d = DEPTH; d >= 1; d--) text('CLAZZIQUE', wx, wy + d, S, 'left', LOGO.shuD, true);
+  text('CLAZZIQUE', wx, wy, S, 'left', LOGO.washi, true);
+  const wc = G.ctx;
+  wc.save(); wc.beginPath(); wc.rect(0, wy + 6 * S, LW, S); wc.clip();
+  text('CLAZZIQUE', wx, wy, S, 'left', LOGO.washiD, true);
+  wc.restore();
+
+  // 2. slice the word along the cut: top half slides up-right, thin red slash in the gap
+  const out = mk(), oc = out.getContext('2d');
+  for (let c = 0; c < LW - 2; c++) {
+    const r = cutAt(c);
+    oc.drawImage(word, c, 0, 1, r, c + 2, -1, 1, r);
+    oc.drawImage(word, c, r, 1, LH - r, c, r + 1, 1, LH - r);
+  }
+  const s0 = wx - 3, s1 = wx + lw + 18;
+  for (let c = s0; c < s1; c++) {
+    const edge = Math.min(1, (c - s0) / 5, (s1 - c) / 18);
+    if (hash(c * 3.1) < edge) { oc.fillStyle = LOGO.shu; oc.fillRect(c, cutAt(c), 1, 1); }
+  }
+
+  // 3. BRAWL brush stroke: drawn flat, skewed so it leans up to the right, ink-outlined, then
+  //    tucked just under the bottom right of the word
+  const bw = 104, bh = 15, lean = 0.06, pad = 3;
+  const flat = mk(bw + pad * 2, bh + pad * 2 + 8);
+  G.ctx = flat.getContext('2d');
+  const fc = G.ctx, by = pad + 7;
+  for (let i = 0; i < bw; i++) {
+    const u = i / bw;
+    const end = u < 0.06 ? 1 - u / 0.06 : u > 0.78 ? (u - 0.78) / 0.22 : 0; // blunt start, tapered lift
+    const top = Math.round(by + end * 5 * (u < 0.5 ? 0.6 : 1) + hash(i * 1.3) * 1.4);
+    const bot = Math.round(by + bh - end * (u < 0.5 ? 3 : 4) - hash(i * 2.7 + 9) * 1.4);
+    for (let y = top; y < bot; y++) {
+      if (u > 0.55 && hash(y * 17.3 + Math.floor(i / 5) * 0.37) < (u - 0.55) * 1.3) continue; // dry-brush streaks
+      fc.fillStyle = y === top ? LOGO.shuD : LOGO.shu;
+      fc.fillRect(pad + i, y, 1, 1);
+    }
+  }
+  let lx = pad + 9;
+  for (const ch of 'BRAWL') {
+    text(ch, lx, by + 2 + 2, 2, 'left', LOGO.shuD, true);
+    text(ch, lx, by + 2, 2, 'left', LOGO.washi, true);
+    lx += textWidth(ch, 2, true) + 3;
+  }
+  const skew = mk(flat.width, flat.height), sc = skew.getContext('2d');
+  for (let c = 0; c < flat.width; c++) sc.drawImage(flat, c, 0, 1, flat.height, c, -Math.round(c * lean), 1, flat.height);
+  const sil = mk(flat.width, flat.height), slc = sil.getContext('2d');
+  slc.drawImage(skew, 0, 0); slc.globalCompositeOperation = 'source-in'; slc.fillStyle = LOGO.ink; slc.fillRect(0, 0, sil.width, sil.height);
+  const bx = wx + lw - bw + 16, byOut = wy + 14;
+  for (const [ox, oy] of [[-2, -2], [0, -2], [2, -2], [-2, 0], [2, 0], [-2, 2], [0, 2], [2, 2]]) oc.drawImage(sil, bx + ox, byOut + oy);
+  oc.drawImage(skew, bx, byOut);
+
+  // 4. tiny 無 seal, top right outside the word like a ™
+  const sw = 15, sh = 14, sx = wx + lw + 3, sy = wy - sh - 1;
+  oc.fillStyle = LOGO.ink; oc.fillRect(sx - 1, sy - 1, sw + 2, sh + 2);
+  oc.fillStyle = LOGO.shu; oc.fillRect(sx, sy, sw, sh);
+  oc.fillStyle = LOGO.washi;
+  SEAL_GLYPH.forEach((row, r) => [...row].forEach((p, c) => { if (p === '#') oc.fillRect(sx + 2 + c, sy + 2 + r, 1, 1); }));
+  for (let k = 0; k < 8; k++) { // worn stamp edge
+    const side = k % 4, e = Math.floor(hash(k * 5.7) * (side < 2 ? sw : sh));
+    const [px, py] = side === 0 ? [sx + e, sy] : side === 1 ? [sx + e, sy + sh - 1] : side === 2 ? [sx, sy + e] : [sx + sw - 1, sy + e];
+    oc.fillStyle = LOGO.ink; oc.fillRect(px, py, 1, 1);
+  }
+
+  G.ctx = keep;
+  logoCanvas = out;
+}
+
 function drawTitle(t) {
   if (Game.showControls) { drawControls(); return; }
   leftShade(225, 110, 0.82);
   const x = 30;
-  // stacked logo over a two-tone P1/P2 bar
-  // extruded logo: black outline around the whole block, player-colour depth, white face
-  const DEPTH = 3;
-  for (const [word, wy, c, LS] of [['CLASSIQUE', 28, PBACK[0], 3], ['BRAWL', 61, PBACK[1], 4]]) {
-    for (let d = 0; d <= DEPTH; d += 2) for (const [ox, oy] of [[-3, -3], [0, -3], [3, -3], [-3, 0], [3, 0], [-3, 3], [0, 3], [3, 3]]) text(word, x + ox, wy + d + oy, LS, 'left', '#000000', true);
-    for (let d = DEPTH; d >= 1; d--) text(word, x, wy + d, LS, 'left', c, true);
-    text(word, x, wy, LS, 'left', '#ffffff', true);
-  }
-  const lw = textWidth('CLASSIQUE', 3, true);
-  G.col(PCOL[0]); G.rect(x, 100, lw / 2 - 1, 2);
-  G.col(PCOL[1]); G.rect(x + lw / 2 + 1, 100, lw / 2 - 1, 2);
-  text('1V1 WEAPON BRAWLER', x, 107, 1, 'left', PAL.mid);
+  if (!logoCanvas) buildLogo();
+  ctx.drawImage(logoCanvas, x - LOGO_X, 34);
+  text('1V1 WEAPON BRAWLER', x, 101, 1, 'left', PAL.mid);
 
   drawButtons(titleItems(), x, 128, 160, Game.menuIdx);
 
@@ -439,8 +556,8 @@ function drawTitle(t) {
 }
 
 const CONTROL_ROWS = [
-  ['LEFT', 'STICK / DPAD'], ['RIGHT', 'STICK / DPAD'], ['UP / AIM UP', 'STICK / DPAD'], ['DOWN / BLOCK / PARRY', 'STICK / DPAD'],
-  ['JUMP', 'A'], ['LIGHT', 'X'], ['HEAVY', 'B'], ['DODGE / DASH / BURST', 'LB / RB'], ['PICK UP / THROW', 'Y'],
+  'LEFT', 'RIGHT', 'UP / AIM UP', 'DOWN / BLOCK / PARRY',
+  'JUMP', 'LIGHT', 'HEAVY', 'DODGE / DASH / BURST', 'PICK UP / THROW',
 ];
 const CONTROL_TIPS = [
   'DODGE + ANY OF 8 DIRECTIONS = DODGE THAT WAY (DASH IF ON COOLDOWN)',
@@ -448,52 +565,64 @@ const CONTROL_TIPS = [
   'GROUND POUNDS BREAK BLOCK    HITS FROM BEHIND AREN\'T BLOCKED',
   'BAR FULL: DODGE WITH NO DIRECTION = BURST (WORKS MID-COMBO, ALSO IN AIR)',
   'AIR HEAVY = RECOVERY    NEUTRAL AIR DODGE + LIGHT = GRAVITY CANCEL',
-  '1P: P1 USES EITHER KEY SET    2P: P1 KEYBOARD, P2 GAMEPAD',
+  'VS CPU: KEYBOARD + ANY GAMEPAD = P1    NO GAMEPAD FOUND = USES KEYS',
 ];
+function deviceLabel(p) {
+  if (DEVICES[p] === 'kb') return 'KEYBOARD';
+  const slot = p === 'p2' && DEVICES.p1 === 'pad' ? 1 : 0;
+  return 'GAMEPAD ' + (slot + 1) + (connectedPads()[slot] ? '' : ' (OFF)');
+}
 function drawControls() {
   ctx.globalAlpha = 0.75; G.col(PAL.bg); G.rect(0, 0, W, H); ctx.globalAlpha = 1;
-  const pw = 460, ph = 344, px = (W - pw) / 2, py = (H - ph) / 2;
+  const pw = 460, ph = 352, px = (W - pw) / 2, py = (H - ph) / 2;
   panel(px, py, pw, ph);
   G.col(PCOL[0]); G.rect(px, py, pw / 2, 3);
   G.col(PCOL[1]); G.rect(px + pw / 2, py, pw / 2, 3);
   otext('CONTROLS', px + 20, py + 16, 2, 'left', '#ffffff', true);
   text('SAVED IN THIS BROWSER', px + pw - 20, py + 20, 1, 'right', PAL.mid);
-  const cols = [px + 20, px + 150, px + 256, px + 362], cellW = [0, 100, 100];
-  ['ACTION', 'P1', 'P2', 'PAD'].forEach((h, i) => text(h, cols[i], py + 40, 1, 'left', i === 1 ? PCOL[0] : i === 2 ? PCOL[1] : PAL.mid));
+  const cols = [px + 20, px + 170, px + 310], cellW = [0, 130, 130];
+  ['ACTION', 'P1', 'P2'].forEach((h, i) => text(h, cols[i], py + 40, 1, 'left', i === 1 ? PCOL[0] : i === 2 ? PCOL[1] : PAL.mid));
   G.col(PAL.dim); G.rect(px + 14, py + 49, pw - 28, 1);
   const RH = 14, ry0 = py + 55;
-  const rows = CONTROL_ROWS.map(([label, pad], j) => [label, bindingLabel('p1', BTN[j]), bindingLabel('p2', BTN[j]), pad]);
-  rows.push(['PAUSE', 'ESC / P', 'ESC / P', 'START']);
+  const rows = [['DEVICE', deviceLabel('p1'), deviceLabel('p2')]];
+  CONTROL_ROWS.forEach((label, j) => rows.push([label, playerLabel('p1', BTN[j]), playerLabel('p2', BTN[j])]));
+  rows.push(['PAUSE', ...CTRL_PLAYERS.map((p) => (DEVICES[p] === 'pad' ? 'START' : 'ESC / P'))]);
   rows.forEach((r, j) => {
     const ry = ry0 + j * RH;
     if (j % 2) { ctx.globalAlpha = 0.5; G.col(PAL.dim); G.rect(px + 14, ry - 3, pw - 28, RH); ctx.globalAlpha = 1; }
     r.forEach((c, i) => {
-      const sel = j < CTRL_RESET && j === Game.ctrlRow && i === Game.ctrlCol + 1;
+      const sel = j < CTRL_BTNS && j === Game.ctrlRow && i === Game.ctrlCol + 1;
+      const p = CTRL_PLAYERS[i - 1];
       if (sel) {
         const blink = Game.rebinding && Game.t % 40 < 20;
         G.col(Game.rebinding ? (blink ? PAL.accent : '#ffffff') : '#ffffff'); G.rect(cols[i] - 4, ry - 3, cellW[i], RH);
         G.col(PAL.accent); G.rect(cols[i] - 6, ry - 3, 2, RH);
-        text(Game.rebinding ? 'PRESS A KEY' : c, cols[i], ry + 1, 1, 'left', PAL.bg, true);
+        const shown = Game.rebinding ? (DEVICES[p] === 'pad' ? 'PRESS A BUTTON' : 'PRESS A KEY') : j === CTRL_DEVICE ? '< ' + c + ' >' : c;
+        text(shown, cols[i], ry + 1, 1, 'left', PAL.bg, true);
       } else {
-        const dimmed = j === CTRL_RESET || i === 3;
-        text(c, cols[i], ry + 1, 1, 'left', i === 0 ? PAL.light : dimmed ? PAL.mid : '#ffffff', true);
+        const fixed = j === rows.length - 1 || (i > 0 && j > CTRL_DEVICE && DEVICES[p] === 'pad' && PAD_DIRS.has(BTN[j - 1]));
+        const col = i === 0 ? PAL.light : j === CTRL_DEVICE ? PAL.accent : fixed ? PAL.mid : '#ffffff';
+        text(c, cols[i], ry + 1, 1, 'left', col, true);
       }
     });
   });
-  // reset button
-  const by = ry0 + rows.length * RH + 2, onReset = Game.ctrlRow === CTRL_RESET;
-  drawButtons([{ label: 'RESET TO DEFAULTS' }], px + 20, by, 140, onReset ? 0 : -1, 0);
-  if (Game.ctrlMsg && Game.t - Game.ctrlMsgT < 120) text(Game.ctrlMsg, px + 172, by + 4, 1, 'left', PAL.accent, true);
+  // swap / reset buttons
+  const by = ry0 + rows.length * RH + 2, onBtns = Game.ctrlRow === CTRL_BTNS;
+  drawButtons([{ label: 'SWAP P1 / P2' }], px + 20, by, 110, onBtns && Game.ctrlCol === 0 ? 0 : -1, 0);
+  drawButtons([{ label: 'RESET TO DEFAULTS' }], px + 140, by, 140, onBtns && Game.ctrlCol === 1 ? 0 : -1, 0);
+  if (Game.ctrlMsg && Game.t - Game.ctrlMsgT < 120) text(Game.ctrlMsg, px + 292, by + 4, 1, 'left', PAL.accent, true);
   G.col(PAL.dim); G.rect(px + 14, by + 22, pw - 28, 1);
   CONTROL_TIPS.forEach((l, i) => text(l, px + 20, by + 30 + i * 11, 1, 'left', PAL.mid));
   let hx = px + 20;
-  const fy = py + ph - 18;
+  const fy = py + ph - 16;
   if (Game.rebinding) {
-    hx = keyHint('ANY KEY', 'BIND', hx, fy);
-    keyHint('ESC', 'CANCEL', hx, fy);
+    const pad = DEVICES[CTRL_PLAYERS[Game.ctrlCol]] === 'pad';
+    hx = keyHint(pad ? 'ANY BUTTON' : 'ANY KEY', 'BIND', hx, fy);
+    keyHint(pad ? 'ESC / START' : 'ESC', 'CANCEL', hx, fy);
   } else {
+    const act = onBtns ? (Game.ctrlCol === 0 ? 'SWAP' : 'RESET') : Game.ctrlRow === CTRL_DEVICE ? 'CHANGE' : 'REBIND';
     hx = keyHint('ARROWS', 'SELECT', hx, fy);
-    hx = keyHint('ENTER', onReset ? 'RESET' : 'REBIND', hx, fy);
+    hx = keyHint('ENTER', act, hx, fy);
     keyHint('ESC', 'BACK', hx, fy);
   }
 }
